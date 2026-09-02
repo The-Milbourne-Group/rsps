@@ -57,7 +57,7 @@ Only four names need checking against your server:
 | `DRAGON_NAME` | `Green dragon` | **Wildcard** — `"Dragon"` would also catch blues and reds |
 | `LOOT_NAME` | `Dragon bones` | **Exact** — nothing else on the ground is ever taken |
 | `BANK_BOOTH_NAME` | `Bank booth` | Wildcard |
-| `DRAGON_DESTINATION` | `west dragons` | Must match the entry in your teleport menu |
+| `DRAGON_DESTINATION` | `West dragons` | Must match the entry in your teleport menu |
 
 Thresholds:
 

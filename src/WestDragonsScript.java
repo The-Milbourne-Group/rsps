@@ -43,9 +43,9 @@ public class WestDragonsScript extends Script {
     /**
      * Destination in the teleport menu used to get back after restocking. The
      * API's name matching is obfuscated, so whether it is case-sensitive could
-     * not be verified: if the return teleport never fires, try "West dragons".
+     * not be verified: if the return teleport never fires, try "west dragons".
      */
-    private static final String DRAGON_DESTINATION = "west dragons";
+    private static final String DRAGON_DESTINATION = "West dragons";
 
     private static final int EAT_AT_HP_PERCENT = 50;
     private static final int DRINK_PRAYER_AT_PERCENT = 30;
