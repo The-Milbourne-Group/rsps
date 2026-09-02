@@ -3,7 +3,8 @@ import rs.kreme.ksbot.api.scripts.Script;
 import rs.kreme.ksbot.api.scripts.ScriptManifest;
 import rs.kreme.ksbot.api.wrappers.KSGroundItem;
 import rs.kreme.ksbot.api.wrappers.KSNPC;
-import rs.kreme.ksbot.api.wrappers.KSObject;
+
+import net.runelite.api.coords.WorldPoint;
 
 /**
  * West Dragons killer.
@@ -38,6 +39,10 @@ public class WestDragonsScript extends Script {
     /** Matched exactly, so nothing else on the ground is ever picked up. */
     private static final String LOOT_NAME = "Dragon bones";
 
+    /**
+     * Registered with ctx.bank as a custom bank object, so the API's own bank
+     * finder recognises this server's booth and can walk to it.
+     */
     private static final String BANK_BOOTH_NAME = "Bank booth";
 
     /**
@@ -48,12 +53,8 @@ public class WestDragonsScript extends Script {
      */
     private static final String HOME_COMMAND = "::home";
 
-    /**
-     * Destination in the teleport menu used to get back after restocking. The
-     * API's name matching is obfuscated, so whether it is case-sensitive could
-     * not be verified: if the return teleport never fires, try "west dragons".
-     */
-    private static final String DRAGON_DESTINATION = "West dragons";
+    /** Chat command that takes us back out to the dragons after restocking. */
+    private static final String DRAGON_COMMAND = "::wests";
 
     private static final int EAT_AT_HP_PERCENT = 50;
     private static final int DRINK_PRAYER_AT_PERCENT = 30;
@@ -63,6 +64,10 @@ public class WestDragonsScript extends Script {
 
     private static final int TELEPORT_TIMEOUT_MS = 6000;
     private static final int BANK_TIMEOUT_MS = 4000;
+
+    /** Generous, because openAndWait() includes walking to the booth. */
+    private static final int BANK_OPEN_TIMEOUT_MS = 12000;
+    private static final int PRESET_TIMEOUT_MS = 4000;
 
     private enum State {
         FIGHTING, LOOTING, SEARCHING,
@@ -81,11 +86,11 @@ public class WestDragonsScript extends Script {
     private boolean presetLoaded = false;
 
     /**
-     * Forces the startup trip to begin with the home teleport even if the script
-     * was started standing at a bank booth, so the run always begins from a known
-     * location rather than wherever the player happened to be logged in.
+     * Cleared at the start of every trip, so the trip always begins by sending
+     * the home command - including the startup trip, which is why it starts
+     * false. Reset if the bank turns out to be unreachable.
      */
-    private boolean startupTeleportPending = true;
+    private boolean teleportedHome = false;
 
     private int loots = 0;
     private int trips = 0;
@@ -98,8 +103,12 @@ public class WestDragonsScript extends Script {
     public boolean onStart() {
         ctx.log("=== West Dragons ===");
         ctx.log("Target: " + DRAGON_NAME + " | Loot: " + LOOT_NAME + " (exact match only)");
-        ctx.log("Restock trip: home teleport -> " + BANK_BOOTH_NAME
-                + " -> Last-Preset -> " + DRAGON_DESTINATION);
+        ctx.log("Restock trip: " + HOME_COMMAND + " -> " + BANK_BOOTH_NAME
+                + " -> Last-Preset -> " + DRAGON_COMMAND);
+
+        // Teaches the API's bank finder about this server's booth, so
+        // ctx.bank.openAndWait() can locate and walk to it.
+        ctx.bank.addCustomBankObject(BANK_BOOTH_NAME);
         ctx.log("Starting with a restock trip.");
         trips++;
         setStatus("Starting");
@@ -151,16 +160,18 @@ public class WestDragonsScript extends Script {
      */
     private State determineState() {
         if (restocking) {
-            if (startupTeleportPending)  return State.TELEPORTING_HOME;
-            if (presetLoaded)            return State.RETURNING;
-            if (ctx.bank.isOpen())       return State.LOADING_PRESET;
-            if (findBankBooth() != null) return State.OPENING_BANK;
-            return State.TELEPORTING_HOME;
+            if (!teleportedHome) return State.TELEPORTING_HOME;
+            if (presetLoaded)    return State.RETURNING;
+            if (ctx.bank.isOpen() || ctx.presets.isOpen()) {
+                return State.LOADING_PRESET;
+            }
+            return State.OPENING_BANK;
         }
 
         if (needsRestock()) {
             restocking = true;
             presetLoaded = false;
+            teleportedHome = false;
             trips++;
             ctx.log("Restocking: " + restockReason());
             return State.TELEPORTING_HOME;
@@ -226,53 +237,56 @@ public class WestDragonsScript extends Script {
     // =========================================================================
 
     /**
-     * The chat command is fire-and-forget - sendCommand() returns void, so unlike
-     * the old magic-tab teleport there is no return value saying whether it
-     * landed. Arrival is confirmed by waiting for the bank booth to come into
-     * range, which is the thing the trip actually needs. Failing that wait is not
-     * an error: the state machine simply routes back here and sends it again.
+     * sendCommand() returns void, so arrival is watched for rather than returned:
+     * the wait is for the player's position to change. That wait failing is not
+     * treated as failure, because the command is a no-op when we are already at
+     * home. Reaching the bank is what actually matters, and openAndWait() below
+     * is the real gate - it resets this flag if it cannot get there.
      */
     private int handleTeleportHome() {
         setStatus("Teleporting home (" + HOME_COMMAND + ")");
-        ctx.chat.sendCommand(HOME_COMMAND);
 
-        if (ctx.sleepUntil(() -> findBankBooth() != null, TELEPORT_TIMEOUT_MS)) {
-            startupTeleportPending = false;
-            return random(600, 1000);
+        WorldPoint before = ctx.players.getLocal().getWorldLocation();
+        ctx.chat.sendCommand(HOME_COMMAND);
+        ctx.sleepUntil(
+                () -> !ctx.players.getLocal().getWorldLocation().equals(before),
+                TELEPORT_TIMEOUT_MS);
+
+        teleportedHome = true;
+        return random(600, 1000);
+    }
+
+    /**
+     * openAndWait() locates the booth, walks to it and opens it. Doing this by
+     * hand - querying for the object and clicking it - was the original bug: it
+     * only worked when the booth happened to already be in reach, and after a
+     * home teleport it usually is not.
+     */
+    private int handleOpenBank() {
+        setStatus("Opening bank");
+        if (ctx.bank.openAndWait(BANK_OPEN_TIMEOUT_MS)) {
+            return random(400, 800);
         }
 
-        ctx.log("No bank booth after " + HOME_COMMAND + " - retrying.");
+        // Could not get to a bank, so we are probably not where we think we are.
+        ctx.log("No bank reachable - re-sending " + HOME_COMMAND + ".");
+        teleportedHome = false;
         return random(1000, 1600);
     }
 
     /**
-     * Most servers put "Last-Preset" straight on the booth, which restocks in one
-     * click. Where they do not, the bank is opened and the preset applied from
-     * inside it instead.
+     * The presets panel is a separate interface from the bank, with its own
+     * open/isOpen pair. Calling lastPreset() without opening it was the second
+     * half of the banking bug - the click had nothing to land on.
      */
-    private int handleOpenBank() {
-        KSObject booth = findBankBooth();
-        if (booth == null) {
-            return random(800, 1200);
-        }
-
-        if (booth.hasAction("Last-Preset")) {
-            setStatus("Booth: Last-Preset");
-            if (booth.interact("Last-Preset")) {
-                presetLoaded = true;
-                ctx.sleep(1200, 1800);
+    private int handleLoadPreset() {
+        if (!ctx.presets.isOpen()) {
+            setStatus("Opening presets");
+            if (!ctx.presets.openAndWait(PRESET_TIMEOUT_MS)) {
                 return random(600, 1000);
             }
         }
 
-        setStatus("Opening bank");
-        if (booth.interact("Bank")) {
-            ctx.sleep(1000, 1600);
-        }
-        return random(600, 1000);
-    }
-
-    private int handleLoadPreset() {
         setStatus("Loading last preset");
         if (ctx.presets.lastPreset()) {
             presetLoaded = true;
@@ -283,14 +297,20 @@ public class WestDragonsScript extends Script {
         return random(600, 1000);
     }
 
+    /** Arrival is confirmed by a dragon coming into view rather than a return value. */
     private int handleReturn() {
-        setStatus("Returning to dragons");
-        if (ctx.teleporter.teleportAndWait(TELEPORT_TIMEOUT_MS, DRAGON_DESTINATION)) {
+        setStatus("Returning to dragons (" + DRAGON_COMMAND + ")");
+        ctx.chat.sendCommand(DRAGON_COMMAND);
+
+        if (ctx.sleepUntil(() -> findDragon() != null, TELEPORT_TIMEOUT_MS)) {
             restocking = false;
             presetLoaded = false;
+            teleportedHome = false;
             ctx.log("Back at the dragons.");
             return random(800, 1400);
         }
+
+        ctx.log("No dragons after " + DRAGON_COMMAND + " - retrying.");
         return random(1000, 1600);
     }
 
@@ -309,10 +329,6 @@ public class WestDragonsScript extends Script {
             return null;
         }
         return bones.distanceTo(ctx.players.getLocal()) <= LOOT_RADIUS ? bones : null;
-    }
-
-    private KSObject findBankBooth() {
-        return ctx.groundObjects.query().withName(BANK_BOOTH_NAME).closest();
     }
 
     private int random(int min, int max) {

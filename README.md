@@ -14,9 +14,9 @@ verified rather than guessed. Compiles clean under `javac -Xlint:all`.
 ## The loop
 
 ```
-on start    ->  ::home -> bank booth -> Last-Preset -> teleport out
+on start    ->  ::home -> bank -> Last-Preset -> ::wests
 supplies OK ->  kill dragon -> take bones -> repeat
-supplies out->  ::home -> bank booth -> Last-Preset -> teleport back
+supplies out->  ::home -> bank -> Last-Preset -> ::wests
 ```
 
 The script begins mid-restock rather than at the dragons, so it does not matter
@@ -37,22 +37,29 @@ teleport still gets healed on the way.
 
 The trip is:
 
-1. `ctx.chat.sendCommand("::home")` — home, as a typed chat command rather than
-   a click on the magic tab.
-2. Find the bank booth.
-3. If the booth has a **Last-Preset** right-click action, click it. That restocks
-   in one click, which is how most servers expose presets.
-4. Otherwise open the bank and call `ctx.presets.lastPreset()` from inside it.
-5. `ctx.teleporter.teleportAndWait(..., DRAGON_DESTINATION)` — back to the dragons.
+1. `ctx.chat.sendCommand("::home")` — home, as a typed chat command.
+2. `ctx.bank.openAndWait(...)` — locates the booth, **walks to it**, opens it.
+3. `ctx.presets.openAndWait(...)` — the presets panel is a separate interface
+   from the bank and has to be opened before anything can be clicked in it.
+4. `ctx.presets.lastPreset()` — Last-Preset.
+5. `ctx.chat.sendCommand("::wests")` — back to the dragons.
+
+Steps 2 and 3 were previously done by hand: the booth was located with an object
+query and clicked directly, and `lastPreset()` was called without opening the
+panel. That only worked if the booth happened to already be in reach — which
+after a home teleport it generally is not — and the preset click had nothing to
+land on. Both now go through the API calls built for the job.
 
 The trip is tracked with a flag rather than inferred from the screen, because
 "at home with a full inventory" and "at home having just restocked" look
 identical to a screen test.
 
-`sendCommand()` returns `void`, so step 1 has no success value to check. Arrival
-is confirmed instead by waiting for the bank booth to come into range — the
-thing the trip actually needs. If it never does, the command is simply sent
-again on the next pass.
+`sendCommand()` returns `void`, so neither teleport has a success value to
+check. The return trip watches for a dragon to come into view. The home trip
+watches for the player's position to change, but does **not** treat that failing
+as an error — `::home` is a no-op when you are already home. Reaching the bank is
+what actually matters, so step 2 is the real gate: if no bank can be reached,
+the trip resets and sends `::home` again.
 
 ## Configuration
 
@@ -62,9 +69,9 @@ Only four names need checking against your server:
 |---|---|---|
 | `DRAGON_NAME` | `Green dragon` | **Wildcard** — `"Dragon"` would also catch blues and reds |
 | `LOOT_NAME` | `Dragon bones` | **Exact** — nothing else on the ground is ever taken |
-| `BANK_BOOTH_NAME` | `Bank booth` | Wildcard |
+| `BANK_BOOTH_NAME` | `Bank booth` | Registered via `ctx.bank.addCustomBankObject(...)` so the API's bank finder can walk to it |
 | `HOME_COMMAND` | `::home` | Sent verbatim, prefix included |
-| `DRAGON_DESTINATION` | `West dragons` | Must match the entry in your teleport menu |
+| `DRAGON_COMMAND` | `::wests` | Sent verbatim, prefix included |
 
 Thresholds:
 
