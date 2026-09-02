@@ -122,3 +122,76 @@ Portals do not move, so position is a stable key for the length of a game.
   server-specific and could not be verified here.
 - Banking or restocking food between games.
 - Prayer or special attack usage.
+
+---
+
+# West Dragons Slayer (KSBot)
+
+A KSBot script that kills dragons at West Dragons indefinitely: find and attack
+dragons, loot valuable drops, eat when needed, bank when full, return to dragons.
+
+Source: [`src/WestDragonsScript.java`](src/WestDragonsScript.java)
+
+## Overview
+
+The script runs an infinite combat loop at West Dragons. It detects game state
+from what is visible on screen (dragons present, ground loot visible) rather than
+from coordinates or widget IDs, which vary between private servers.
+
+### State Machine
+
+```
+Dragon visible?        -> SLAYING
+else, ground loot?     -> LOOTING
+else, health critical? -> EATING
+else, inventory full?  -> BANKING
+else                   -> WALKING_TO_DRAGONS
+```
+
+In the SLAYING state, the script prioritizes:
+1. Attack if idle
+2. Blacklist and try another if the dragon refuses (spell/projectile blocked)
+3. Idle while in combat
+
+### Loot Priority
+
+High-value drops (Dragon scales, bones, dragonstone) are looted automatically by
+name. Configure `LOOT_PRIORITY` to change what gets picked up, or leave it empty
+to loot everything on the ground.
+
+### Configuration
+
+All at the top of `WestDragonsScript.java`:
+
+| Setting | Default | Notes |
+|---|---|---|
+| `DRAGON_NAMES` | `Dragon` | Change if your server names them differently |
+| `EAT_AT_HP_PERCENT` | `40` | Set food to an empty array to disable eating |
+| `FOOD` | Shark → Tuna | Priority order |
+| `LOOT_PRIORITY` | Scales, bones, ore | Leave empty to loot everything |
+| `BANK_AT_INVENTORY_PERCENT` | `85` | Return to bank when inventory hits this % full |
+| `MAX_PURSUIT_DISTANCE` | `50` | Tiles to chase a dragon before giving up |
+| `RELY_ON_INTERACT_AUTOWALK` | `true` | Set false if `interact()` does not walk to out-of-range targets |
+
+## Not Implemented
+
+- Specific dragon selection (waterfall vs. brutal vs. blue) — the script finds and
+  attacks any dragon named "Dragon"
+- Banking location — currently stubbed; implement based on your server's bank
+- Walking path back to dragons — currently stubbed; customize for your server
+- Prayer or special attack usage
+- Multi-stage loot routes (only banks at full inventory)
+- Avoiding PKers in wilderness (if applicable to your server)
+
+## API Notes
+
+The script is written in two layers:
+
+- **Game logic** (lines 1-270) — uses only the wrapper methods defined at the
+  bottom. This part is API-independent.
+- **API adapter** (lines 280-350) — every call isolated, with alternatives
+  documented where the API could vary.
+
+The Elorin API (rs.kreme.elorin-api.jar) is a RuneLite-based abstraction, so
+methods are stable. If it does not compile, errors will land in the adapter block.
+
