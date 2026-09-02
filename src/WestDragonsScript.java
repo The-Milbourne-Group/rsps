@@ -1,6 +1,6 @@
-import rs.kreme.ksbot.api.scripts.Category;
-import rs.kreme.ksbot.api.scripts.Script;
-import rs.kreme.ksbot.api.scripts.ScriptManifest;
+import rs.kreme.ksbot.api.script.Script;
+import rs.kreme.ksbot.api.script.ScriptManifest;
+import rs.kreme.ksbot.api.script.ScriptManifest.Category;
 import rs.kreme.ksbot.api.wrappers.KSGroundItem;
 import rs.kreme.ksbot.api.wrappers.KSNPC;
 
