@@ -1,62 +1,69 @@
 import rs.kreme.ksbot.api.scripts.Category;
 import rs.kreme.ksbot.api.scripts.Script;
 import rs.kreme.ksbot.api.scripts.ScriptManifest;
-import rs.kreme.ksbot.api.wrappers.KSNPC;
 import rs.kreme.ksbot.api.wrappers.KSGroundItem;
-import rs.kreme.ksbot.api.game.magic.SpellBook;
-
-import java.util.HashMap;
-import java.util.Map;
+import rs.kreme.ksbot.api.wrappers.KSNPC;
+import rs.kreme.ksbot.api.wrappers.KSObject;
 
 /**
- * West Dragons Slaying Script.
+ * West Dragons killer.
  *
- * Runs an infinite loop: find dragons -> attack -> loot dragon bones -> eat if needed
- * -> when inventory full: teleport via spell -> load preset -> return to dragons.
+ * Kill green dragons, loot only their bones, and run a restock trip whenever the
+ * inventory fills up or supplies run out: home teleport -> bank booth ->
+ * "Last-Preset" -> teleport back.
+ *
+ * Verify the four names in CONFIG against your server before running. Everything
+ * else is resolved through the API rather than hardcoded, so it does not need
+ * per-server tuning.
  */
 @ScriptManifest(
-        name = "West Dragons Slayer",
+        name = "West Dragons",
         author = "YourName",
         servers = { "osrs" },
-        description = "Kills dragons at West Dragons, loots bones, teleports and loads preset.",
+        description = "Kills west dragons, loots bones, restocks via bank preset.",
         category = Category.COMBAT
 )
 public class WestDragonsScript extends Script {
 
     // =========================================================================
-    // CONFIG - verify these against your server
+    // CONFIG - verify these four names against your server
     // =========================================================================
 
-    private static final String[] DRAGON_NAMES = { "Dragon" };
-    private static final int EAT_AT_HP_PERCENT = 40;
-    private static final String[] FOOD = { "Shark", "Monkfish", "Swordfish", "Lobster", "Tuna" };
+    /** Matched as a wildcard, so "Dragon" would also catch blues and reds. */
+    private static final String DRAGON_NAME = "Green dragon";
 
-    /** Only loot dragon bones. */
-    private static final String[] LOOT_PRIORITY = { "Dragon bones" };
+    /** Matched exactly, so nothing else on the ground is ever picked up. */
+    private static final String LOOT_NAME = "Dragon bones";
 
-    /** Return to bank if inventory is this full. */
-    private static final int BANK_AT_INVENTORY_PERCENT = 85;
+    private static final String BANK_BOOTH_NAME = "Bank booth";
 
-    /** Teleport spell to cast. Use SpellBook.Standard enum names (e.g., "ORION_HOME_TELEPORT") */
-    private static final String TELEPORT_SPELL = "ORION_HOME_TELEPORT";
+    /** Destination in the teleport menu used to get back after restocking. */
+    private static final String DRAGON_DESTINATION = "Green dragons";
 
-    /** Preset name to load after teleporting. */
-    private static final String BANK_PRESET = "West Dragons";
+    private static final int EAT_AT_HP_PERCENT = 50;
+    private static final int DRINK_PRAYER_AT_PERCENT = 30;
 
-    /** How long to ignore a dragon after it refuses an attack. */
-    private static final long DRAGON_BLACKLIST_MS = 8 * 1000L;
+    /** Only bones within this many tiles are collected. */
+    private static final int LOOT_RADIUS = 8;
 
-    private enum State { SLAYING, LOOTING, EATING, TELEPORTING, BANKING, WALKING_TO_DRAGONS }
+    private static final int TELEPORT_TIMEOUT_MS = 6000;
+    private static final int BANK_TIMEOUT_MS = 4000;
+
+    private enum State {
+        FIGHTING, LOOTING, SEARCHING,
+        TELEPORTING_HOME, OPENING_BANK, LOADING_PRESET, RETURNING
+    }
 
     // =========================================================================
     // RUNTIME STATE
     // =========================================================================
 
-    private int dragonsKilled = 0;
-    private int itemsLooted = 0;
-    private int foodEaten = 0;
-    private int bankTrips = 0;
-    private final Map<String, Long> dragonBlacklist = new HashMap<>();
+    /** True from the moment supplies run short until we are back at the dragons. */
+    private boolean restocking = false;
+    private boolean presetLoaded = false;
+
+    private int loots = 0;
+    private int trips = 0;
 
     // =========================================================================
     // LIFECYCLE
@@ -64,246 +71,211 @@ public class WestDragonsScript extends Script {
 
     @Override
     public boolean onStart() {
-        ctx.log("=== West Dragons Slayer ===");
-        ctx.log("Teleport spell: " + TELEPORT_SPELL);
-        ctx.log("Banking preset: " + BANK_PRESET);
-        setStatus("Initializing...");
+        ctx.log("=== West Dragons ===");
+        ctx.log("Target: " + DRAGON_NAME + " | Loot: " + LOOT_NAME + " (exact match only)");
+        ctx.log("Restock trip: home teleport -> " + BANK_BOOTH_NAME
+                + " -> Last-Preset -> " + DRAGON_DESTINATION);
+        setStatus("Starting");
         return true;
     }
 
     @Override
     public int onProcess() {
-        State state = determineState();
-        switch (state) {
-            case SLAYING: return handleSlaying();
-            case LOOTING: return handleLooting();
-            case EATING: return handleEating();
-            case TELEPORTING: return handleTeleporting();
-            case BANKING: return handleBanking();
-            case WALKING_TO_DRAGONS: return handleWalkingToDragons();
-            default: return random(1000, 1500);
+        // Survival runs in every state, including mid-trip. Both calls no-op when
+        // the threshold has not been reached.
+        if (ctx.consumables.eatAtPercent(EAT_AT_HP_PERCENT)) {
+            setStatus("Eating");
+            return random(600, 1000);
+        }
+        if (ctx.prayer.getPercentLeft() <= DRINK_PRAYER_AT_PERCENT
+                && ctx.consumables.drinkPrayer()) {
+            setStatus("Drinking prayer");
+            return random(600, 1000);
+        }
+
+        switch (determineState()) {
+            case FIGHTING:          return handleFighting();
+            case LOOTING:           return handleLooting();
+            case TELEPORTING_HOME:  return handleTeleportHome();
+            case OPENING_BANK:      return handleOpenBank();
+            case LOADING_PRESET:    return handleLoadPreset();
+            case RETURNING:         return handleReturn();
+            case SEARCHING:
+            default:                return handleSearching();
         }
     }
 
     @Override
     public void onStop() {
         ctx.log("=== Session summary ===");
-        ctx.log("Runtime:          " + getTimer().getElapsedTime());
-        ctx.log("Dragons killed:   " + dragonsKilled);
-        ctx.log("Items looted:     " + itemsLooted);
-        ctx.log("Food eaten:       " + foodEaten);
-        ctx.log("Bank trips:       " + bankTrips);
+        ctx.log("Runtime:        " + getTimer().getElapsedTime());
+        ctx.log("Bones looted:   " + loots);
+        ctx.log("Restock trips:  " + trips);
     }
 
     // =========================================================================
     // STATE DETECTION
     // =========================================================================
 
+    /**
+     * A restock trip is a flag rather than a screen test: "standing at home with a
+     * full inventory" and "standing at home having just restocked" look identical,
+     * so the trip has to remember which half of it we are in.
+     */
     private State determineState() {
-        if (shouldEat()) return State.EATING;
-        if (shouldBank()) return State.TELEPORTING;
-        if (findLoot() != null) return State.LOOTING;
-        if (findDragon() != null) return State.SLAYING;
-        return State.WALKING_TO_DRAGONS;
+        if (restocking) {
+            if (presetLoaded)            return State.RETURNING;
+            if (ctx.bank.isOpen())       return State.LOADING_PRESET;
+            if (findBankBooth() != null) return State.OPENING_BANK;
+            return State.TELEPORTING_HOME;
+        }
+
+        if (needsRestock()) {
+            restocking = true;
+            presetLoaded = false;
+            trips++;
+            ctx.log("Restocking: " + restockReason());
+            return State.TELEPORTING_HOME;
+        }
+
+        if (findLoot() != null)   return State.LOOTING;
+        if (findDragon() != null) return State.FIGHTING;
+        return State.SEARCHING;
+    }
+
+    /** Any one of these ends the trip at the dragons. */
+    private boolean needsRestock() {
+        return ctx.inventory.isFull()
+                || !ctx.consumables.hasFood()
+                || !ctx.consumables.hasPrayer();
+    }
+
+    private String restockReason() {
+        if (ctx.inventory.isFull())        return "inventory full";
+        if (!ctx.consumables.hasFood())    return "out of food";
+        return "out of prayer potions";
     }
 
     // =========================================================================
-    // STATE HANDLERS
+    // AT THE DRAGONS
     // =========================================================================
 
-    private int handleSlaying() {
-        KSNPC dragon = findDragon();
-        if (dragon == null) {
-            setStatus("Looking for dragons");
-            return random(1000, 1500);
+    private int handleFighting() {
+        if (!ctx.players.getLocal().isIdle()) {
+            setStatus("Fighting");
+            return random(700, 1200);
         }
 
-        if (!isIdle()) {
-            setStatus("Fighting dragon");
+        KSNPC dragon = findDragon();
+        if (dragon != null && dragon.interact("Attack")) {
+            setStatus("Attacking");
+            return random(800, 1300);
+        }
+        return random(500, 900);
+    }
+
+    /**
+     * Bones are taken before the next dragon is engaged, so a full kill's drop is
+     * never left behind while a new fight starts.
+     */
+    private int handleLooting() {
+        KSGroundItem bones = findLoot();
+        if (bones != null && bones.interact("Take")) {
+            loots++;
+            setStatus("Looting bones");
+            return random(600, 1000);
+        }
+        return random(400, 800);
+    }
+
+    private int handleSearching() {
+        setStatus("Looking for dragons");
+        return random(1000, 1800);
+    }
+
+    // =========================================================================
+    // RESTOCK TRIP
+    // =========================================================================
+
+    private int handleTeleportHome() {
+        setStatus("Teleporting home");
+        if (ctx.magic.teleportHomeAndWait(TELEPORT_TIMEOUT_MS)) {
+            return random(600, 1000);
+        }
+        return random(1000, 1600);
+    }
+
+    /**
+     * Most servers put "Last-Preset" straight on the booth, which restocks in one
+     * click. Where they do not, the bank is opened and the preset applied from
+     * inside it instead.
+     */
+    private int handleOpenBank() {
+        KSObject booth = findBankBooth();
+        if (booth == null) {
+            return random(800, 1200);
+        }
+
+        if (booth.hasAction("Last-Preset")) {
+            setStatus("Booth: Last-Preset");
+            if (booth.interact("Last-Preset")) {
+                presetLoaded = true;
+                ctx.sleep(1200, 1800);
+                return random(600, 1000);
+            }
+        }
+
+        setStatus("Opening bank");
+        if (booth.interact("Bank")) {
+            ctx.sleep(1000, 1600);
+        }
+        return random(600, 1000);
+    }
+
+    private int handleLoadPreset() {
+        setStatus("Loading last preset");
+        if (ctx.presets.lastPreset()) {
+            presetLoaded = true;
+            ctx.sleep(1200, 1800);
+            ctx.bank.closeAndWait(BANK_TIMEOUT_MS);
+            return random(600, 1000);
+        }
+        return random(600, 1000);
+    }
+
+    private int handleReturn() {
+        setStatus("Returning to dragons");
+        if (ctx.teleporter.teleportAndWait(TELEPORT_TIMEOUT_MS, DRAGON_DESTINATION)) {
+            restocking = false;
+            presetLoaded = false;
+            ctx.log("Back at the dragons.");
             return random(800, 1400);
         }
-
-        if (attackNpc(dragon)) {
-            dragonsKilled++;
-            setStatus("Attacking dragon");
-            return random(800, 1200);
-        }
-
-        blacklistDragon(dragon);
-        return random(400, 600);
-    }
-
-    private int handleLooting() {
-        KSGroundItem loot = findLoot();
-        if (loot == null) {
-            setStatus("No loot nearby");
-            return random(800, 1200);
-        }
-
-        if (loot.interact("Take")) {
-            itemsLooted++;
-            setStatus("Looting: " + loot.getName());
-            return random(600, 1000);
-        }
-
-        return random(500, 800);
-    }
-
-    private int handleEating() {
-        setStatus("Eating");
-        if (eatFood()) {
-            foodEaten++;
-            return random(900, 1400);
-        }
-
-        setStatus("Out of food");
-        return random(2000, 3000);
-    }
-
-    private int handleTeleporting() {
-        setStatus("Casting teleport");
-        if (castTeleportSpell()) {
-            ctx.log("Teleported. Waiting for load...");
-            ctx.sleep(1500, 2500);
-            return random(600, 1000);
-        }
-
-        return random(800, 1200);
-    }
-
-    private int handleBanking() {
-        setStatus("Loading preset");
-        bankTrips++;
-
-        if (loadPreset(BANK_PRESET)) {
-            ctx.log("Preset loaded. Returning to dragons...");
-            ctx.sleep(1500, 2000);
-            return random(1000, 1500);
-        }
-
-        return random(800, 1200);
-    }
-
-    private int handleWalkingToDragons() {
-        setStatus("Walking to dragons");
-        if (findDragon() != null) {
-            return random(600, 1000);
-        }
-
-        return random(1500, 2500);
+        return random(1000, 1600);
     }
 
     // =========================================================================
-    // TARGET SELECTION
+    // LOOKUPS
     // =========================================================================
 
     private KSNPC findDragon() {
-        for (String name : DRAGON_NAMES) {
-            KSNPC dragon = findNpcByName(name);
-            if (dragon != null && !isBlacklisted(dragon)) {
-                return dragon;
-            }
-        }
-        return null;
+        return ctx.npcs.query().withName(DRAGON_NAME).alive().closest();
     }
 
+    /** Exact name match, so only dragon bones are ever taken. */
     private KSGroundItem findLoot() {
-        if (LOOT_PRIORITY.length == 0) {
-            return ctx.groundItems.query().closest();
+        KSGroundItem bones = ctx.groundItems.query().withExactName(LOOT_NAME).closest();
+        if (bones == null || ctx.inventory.isFull()) {
+            return null;
         }
-
-        for (String item : LOOT_PRIORITY) {
-            KSGroundItem loot = ctx.groundItems.query()
-                    .withName(item)
-                    .closest();
-            if (loot != null) return loot;
-        }
-        return null;
+        return bones.distanceTo(ctx.players.getLocal()) <= LOOT_RADIUS ? bones : null;
     }
 
-    private KSNPC findNpcByName(String name) {
-        return ctx.npcs.query().withName(name).closest();
-    }
-
-    private void blacklistDragon(KSNPC dragon) {
-        dragonBlacklist.put(dragonKey(dragon), System.currentTimeMillis() + DRAGON_BLACKLIST_MS);
-    }
-
-    private boolean isBlacklisted(KSNPC dragon) {
-        Long until = dragonBlacklist.get(dragonKey(dragon));
-        if (until == null) return false;
-        if (System.currentTimeMillis() > until) {
-            dragonBlacklist.remove(dragonKey(dragon));
-            return false;
-        }
-        return true;
-    }
-
-    private String dragonKey(KSNPC dragon) {
-        return dragon.getWorldLocation().toString();
+    private KSObject findBankBooth() {
+        return ctx.groundObjects.query().withName(BANK_BOOTH_NAME).closest();
     }
 
     private int random(int min, int max) {
         return min + (int) (Math.random() * (max - min));
-    }
-
-    // =========================================================================
-    // API ADAPTER
-    // =========================================================================
-
-    private boolean isIdle() {
-        return ctx.players.getLocal().isIdle();
-    }
-
-    private int healthPercent() {
-        return (int) ctx.combat.getHealthPercent();
-    }
-
-    private boolean shouldEat() {
-        return FOOD.length > 0 && healthPercent() <= EAT_AT_HP_PERCENT;
-    }
-
-    private boolean shouldBank() {
-        return getInventoryPercent() >= BANK_AT_INVENTORY_PERCENT;
-    }
-
-    private int getInventoryPercent() {
-        int count = ctx.inventory.size();
-        return (count * 100) / 28;
-    }
-
-    private boolean eatFood() {
-        for (String food : FOOD) {
-            if (ctx.inventory.getItem(food) != null
-                    && ctx.inventory.getItem(food).interact("Eat")) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private boolean attackNpc(KSNPC npc) {
-        return npc != null && npc.interact("Attack");
-    }
-
-    /** Cast the teleport spell by name. */
-    private boolean castTeleportSpell() {
-        try {
-            SpellBook.Standard spell = SpellBook.Standard.valueOf(TELEPORT_SPELL);
-            if (spell.canCast()) {
-                spell.cast();
-                return true;
-            }
-            ctx.log("Cannot cast " + TELEPORT_SPELL + " (insufficient runes or level)");
-            return false;
-        } catch (IllegalArgumentException e) {
-            ctx.log("Unknown spell: " + TELEPORT_SPELL);
-            return false;
-        }
-    }
-
-    /** Load a preset by name. */
-    private boolean loadPreset(String presetName) {
-        return ctx.presets.loadPreset(presetName);
     }
 }

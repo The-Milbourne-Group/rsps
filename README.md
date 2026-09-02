@@ -125,73 +125,78 @@ Portals do not move, so position is a stable key for the length of a game.
 
 ---
 
-# West Dragons Slayer (KSBot)
+# West Dragons (KSBot)
 
-A KSBot script that kills dragons at West Dragons indefinitely: find and attack
-dragons, loot valuable drops, eat when needed, bank when full, return to dragons.
+Kills west dragons, loots only their bones, and restocks through a bank preset
+when supplies run out. Runs indefinitely.
 
 Source: [`src/WestDragonsScript.java`](src/WestDragonsScript.java)
 
-## Overview
+Unlike the Pest Control script, this one was written against the real API
+(`libs/rs.kreme.elorin-api.jar`), so every call is verified rather than guessed.
+It compiles clean under `javac -Xlint:all`.
 
-The script runs an infinite combat loop at West Dragons. It detects game state
-from what is visible on screen (dragons present, ground loot visible) rather than
-from coordinates or widget IDs, which vary between private servers.
-
-### State Machine
+## The loop
 
 ```
-Dragon visible?        -> SLAYING
-else, ground loot?     -> LOOTING
-else, health critical? -> EATING
-else, inventory full?  -> BANKING
-else                   -> WALKING_TO_DRAGONS
+supplies OK  ->  kill dragon -> take bones -> repeat
+supplies out ->  home teleport -> bank booth -> Last-Preset -> teleport back
 ```
 
-In the SLAYING state, the script prioritizes:
-1. Attack if idle
-2. Blacklist and try another if the dragon refuses (spell/projectile blocked)
-3. Idle while in combat
+A restock trip starts when **any** of these is true:
 
-### Loot Priority
+- the inventory is full
+- there is no food left
+- there are no prayer potions left
 
-High-value drops (Dragon scales, bones, dragonstone) are looted automatically by
-name. Configure `LOOT_PRIORITY` to change what gets picked up, or leave it empty
-to loot everything on the ground.
+Eating and prayer restore run on every tick, including mid-trip, so a low-HP
+teleport still gets healed on the way.
 
-### Configuration
+## Restocking
 
-All at the top of `WestDragonsScript.java`:
+The trip is:
 
-| Setting | Default | Notes |
+1. `ctx.magic.teleportHomeAndWait(...)` — home.
+2. Find the bank booth.
+3. If the booth has a **Last-Preset** right-click action, click it. That restocks
+   in one click, which is how most servers expose presets.
+4. Otherwise open the bank and call `ctx.presets.lastPreset()` from inside it.
+5. `ctx.teleporter.teleportAndWait(..., DRAGON_DESTINATION)` — back to the dragons.
+
+The trip is tracked with a flag rather than inferred from the screen, because
+"at home with a full inventory" and "at home having just restocked" look
+identical to a screen test.
+
+## Configuration
+
+Only four names need checking against your server:
+
+| Setting | Default | Matching |
 |---|---|---|
-| `DRAGON_NAMES` | `Dragon` | Change if your server names them differently |
-| `EAT_AT_HP_PERCENT` | `40` | Set food to an empty array to disable eating |
-| `FOOD` | Shark → Tuna | Priority order |
-| `LOOT_PRIORITY` | Scales, bones, ore | Leave empty to loot everything |
-| `BANK_AT_INVENTORY_PERCENT` | `85` | Return to bank when inventory hits this % full |
-| `MAX_PURSUIT_DISTANCE` | `50` | Tiles to chase a dragon before giving up |
-| `RELY_ON_INTERACT_AUTOWALK` | `true` | Set false if `interact()` does not walk to out-of-range targets |
+| `DRAGON_NAME` | `Green dragon` | **Wildcard** — `"Dragon"` would also catch blues and reds |
+| `LOOT_NAME` | `Dragon bones` | **Exact** — nothing else on the ground is ever taken |
+| `BANK_BOOTH_NAME` | `Bank booth` | Wildcard |
+| `DRAGON_DESTINATION` | `Green dragons` | Must match the entry in your teleport menu |
 
-## Not Implemented
+Thresholds:
 
-- Specific dragon selection (waterfall vs. brutal vs. blue) — the script finds and
-  attacks any dragon named "Dragon"
-- Banking location — currently stubbed; implement based on your server's bank
-- Walking path back to dragons — currently stubbed; customize for your server
-- Prayer or special attack usage
-- Multi-stage loot routes (only banks at full inventory)
-- Avoiding PKers in wilderness (if applicable to your server)
+| Setting | Default |
+|---|---|
+| `EAT_AT_HP_PERCENT` | `50` |
+| `DRINK_PRAYER_AT_PERCENT` | `30` |
+| `LOOT_RADIUS` | `8` tiles |
 
-## API Notes
+## Not implemented
 
-The script is written in two layers:
+- **Antifire is not handled.** `ctx.consumables.hasAntifire()` exists in the API,
+  so this can be added — say whether you use an antifire potion or an
+  anti-dragon shield and it can go in the restock check.
+- No prayer *activation* (Protect from Magic); the script only drinks potions to
+  keep prayer points up.
+- No PKer detection — fine if west dragons are non-Wilderness on your server.
 
-- **Game logic** (lines 1-270) — uses only the wrapper methods defined at the
-  bottom. This part is API-independent.
-- **API adapter** (lines 280-350) — every call isolated, with alternatives
-  documented where the API could vary.
+## Building
 
-The Elorin API (rs.kreme.elorin-api.jar) is a RuneLite-based abstraction, so
-methods are stable. If it does not compile, errors will land in the adapter block.
-
+```
+javac -cp libs/rs.kreme.elorin-api.jar -d out src/WestDragonsScript.java
+```
