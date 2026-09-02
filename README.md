@@ -14,9 +14,9 @@ verified rather than guessed. Compiles clean under `javac -Xlint:all`.
 ## The loop
 
 ```
-on start    ->  home teleport -> bank booth -> Last-Preset -> teleport out
+on start    ->  ::home -> bank booth -> Last-Preset -> teleport out
 supplies OK ->  kill dragon -> take bones -> repeat
-supplies out->  home teleport -> bank booth -> Last-Preset -> teleport back
+supplies out->  ::home -> bank booth -> Last-Preset -> teleport back
 ```
 
 The script begins mid-restock rather than at the dragons, so it does not matter
@@ -37,7 +37,8 @@ teleport still gets healed on the way.
 
 The trip is:
 
-1. `ctx.magic.teleportHomeAndWait(...)` — home.
+1. `ctx.chat.sendCommand("::home")` — home, as a typed chat command rather than
+   a click on the magic tab.
 2. Find the bank booth.
 3. If the booth has a **Last-Preset** right-click action, click it. That restocks
    in one click, which is how most servers expose presets.
@@ -48,6 +49,11 @@ The trip is tracked with a flag rather than inferred from the screen, because
 "at home with a full inventory" and "at home having just restocked" look
 identical to a screen test.
 
+`sendCommand()` returns `void`, so step 1 has no success value to check. Arrival
+is confirmed instead by waiting for the bank booth to come into range — the
+thing the trip actually needs. If it never does, the command is simply sent
+again on the next pass.
+
 ## Configuration
 
 Only four names need checking against your server:
@@ -57,6 +63,7 @@ Only four names need checking against your server:
 | `DRAGON_NAME` | `Green dragon` | **Wildcard** — `"Dragon"` would also catch blues and reds |
 | `LOOT_NAME` | `Dragon bones` | **Exact** — nothing else on the ground is ever taken |
 | `BANK_BOOTH_NAME` | `Bank booth` | Wildcard |
+| `HOME_COMMAND` | `::home` | Sent verbatim, prefix included |
 | `DRAGON_DESTINATION` | `West dragons` | Must match the entry in your teleport menu |
 
 Thresholds:

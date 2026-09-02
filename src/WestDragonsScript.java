@@ -9,11 +9,11 @@ import rs.kreme.ksbot.api.wrappers.KSObject;
  * West Dragons killer.
  *
  * Kill green dragons, loot only their bones, and run a restock trip whenever the
- * inventory fills up or supplies run out: home teleport -> bank booth ->
+ * inventory fills up or supplies run out: "::home" -> bank booth ->
  * "Last-Preset" -> teleport back.
  *
  * The script starts by running that same trip, so it can be started from
- * anywhere and with anything in the inventory: it teleports home, loads the
+ * anywhere and with anything in the inventory: it sends "::home", loads the
  * preset, and only then travels out to the dragons.
  *
  * Dragonfire is handled by wearing an anti-dragon shield, so there is no
@@ -39,6 +39,14 @@ public class WestDragonsScript extends Script {
     private static final String LOOT_NAME = "Dragon bones";
 
     private static final String BANK_BOOTH_NAME = "Bank booth";
+
+    /**
+     * Chat command used to get home. Sent verbatim, so it carries its own "::"
+     * prefix. Whether ctx.chat.sendCommand() adds the prefix itself could not be
+     * verified against the obfuscated API: if the client ends up sending
+     * "::::home", drop the prefix here and leave just "home".
+     */
+    private static final String HOME_COMMAND = "::home";
 
     /**
      * Destination in the teleport menu used to get back after restocking. The
@@ -217,12 +225,23 @@ public class WestDragonsScript extends Script {
     // RESTOCK TRIP
     // =========================================================================
 
+    /**
+     * The chat command is fire-and-forget - sendCommand() returns void, so unlike
+     * the old magic-tab teleport there is no return value saying whether it
+     * landed. Arrival is confirmed by waiting for the bank booth to come into
+     * range, which is the thing the trip actually needs. Failing that wait is not
+     * an error: the state machine simply routes back here and sends it again.
+     */
     private int handleTeleportHome() {
-        setStatus("Teleporting home");
-        if (ctx.magic.teleportHomeAndWait(TELEPORT_TIMEOUT_MS)) {
+        setStatus("Teleporting home (" + HOME_COMMAND + ")");
+        ctx.chat.sendCommand(HOME_COMMAND);
+
+        if (ctx.sleepUntil(() -> findBankBooth() != null, TELEPORT_TIMEOUT_MS)) {
             startupTeleportPending = false;
             return random(600, 1000);
         }
+
+        ctx.log("No bank booth after " + HOME_COMMAND + " - retrying.");
         return random(1000, 1600);
     }
 
