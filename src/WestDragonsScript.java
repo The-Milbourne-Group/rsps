@@ -3,6 +3,7 @@ import rs.kreme.ksbot.api.scripts.Script;
 import rs.kreme.ksbot.api.scripts.ScriptManifest;
 import rs.kreme.ksbot.api.wrappers.KSNPC;
 import rs.kreme.ksbot.api.wrappers.KSGroundItem;
+import rs.kreme.ksbot.api.game.magic.SpellBook;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -10,26 +11,14 @@ import java.util.Map;
 /**
  * West Dragons Slaying Script.
  *
- * Runs an infinite loop: find dragons near West Dragons -> attack -> loot drops
- * -> eat if needed -> bank if inventory full -> return to dragons.
- *
- * The script survives common interruptions: dying, inventory filling, running out
- * of food, and wandering too far from the dragons. It uses screen state detection
- * rather than widget IDs or coordinates.
- *
- * --------------------------------------------------------------------------
- * BEFORE YOU RUN THIS - READ THE TWO BLOCKS BELOW
- * --------------------------------------------------------------------------
- * 1. CONFIG: dragon names and loot table differ per RSPS. Verify them against your server.
- * 2. API ADAPTER (bottom of file): calls that may not be in the KSBot demo script.
- *    If the script does not compile, the errors will point here.
- * --------------------------------------------------------------------------
+ * Runs an infinite loop: find dragons -> attack -> loot dragon bones -> eat if needed
+ * -> when inventory full: teleport via spell -> load preset -> return to dragons.
  */
 @ScriptManifest(
         name = "West Dragons Slayer",
         author = "YourName",
         servers = { "osrs" },
-        description = "Kills dragons at West Dragons, loots drops, banks when needed.",
+        description = "Kills dragons at West Dragons, loots bones, teleports and loads preset.",
         category = Category.COMBAT
 )
 public class WestDragonsScript extends Script {
@@ -38,46 +27,36 @@ public class WestDragonsScript extends Script {
     // CONFIG - verify these against your server
     // =========================================================================
 
-    /** Names that identify a dragon NPC. Priority order - most valuable first. */
     private static final String[] DRAGON_NAMES = { "Dragon" };
-
-    /** Eat when hitpoints fall to or below this percentage. */
     private static final int EAT_AT_HP_PERCENT = 40;
-
-    /** Food to eat, in priority order. Leave empty to disable eating. */
     private static final String[] FOOD = { "Shark", "Monkfish", "Swordfish", "Lobster", "Tuna" };
 
-    /** High-value loot to pick up. Leave empty to loot everything. */
-    private static final String[] LOOT_PRIORITY = { "Dragon scale", "Dragon bones", "Dragonstone" };
+    /** Only loot dragon bones. */
+    private static final String[] LOOT_PRIORITY = { "Dragon bones" };
 
-    /** Return to bank if inventory is this full (0-28). */
+    /** Return to bank if inventory is this full. */
     private static final int BANK_AT_INVENTORY_PERCENT = 85;
 
-    /** Max distance (tiles) to chase a dragon before giving up and finding a new one. */
-    private static final int MAX_PURSUIT_DISTANCE = 50;
+    /** Teleport spell to cast. Use SpellBook.Standard enum names (e.g., "ORION_HOME_TELEPORT") */
+    private static final String TELEPORT_SPELL = "ORION_HOME_TELEPORT";
+
+    /** Preset name to load after teleporting. */
+    private static final String BANK_PRESET = "West Dragons";
 
     /** How long to ignore a dragon after it refuses an attack. */
     private static final long DRAGON_BLACKLIST_MS = 8 * 1000L;
 
-    /** Set false if interact() does not auto-walk to out-of-range targets. */
-    private static final boolean RELY_ON_INTERACT_AUTOWALK = true;
-
-    private enum State { SLAYING, LOOTING, EATING, BANKING, WALKING_TO_DRAGONS }
+    private enum State { SLAYING, LOOTING, EATING, TELEPORTING, BANKING, WALKING_TO_DRAGONS }
 
     // =========================================================================
     // RUNTIME STATE
     // =========================================================================
 
-    private boolean inCombat = false;
-    private long lastCombatTime = 0L;
-
     private int dragonsKilled = 0;
     private int itemsLooted = 0;
     private int foodEaten = 0;
     private int bankTrips = 0;
-
-    /** Dragon position -> timestamp until which it is ignored. */
-    private final Map<String, Long> dragonBlacklist = new HashMap<String, Long>();
+    private final Map<String, Long> dragonBlacklist = new HashMap<>();
 
     // =========================================================================
     // LIFECYCLE
@@ -86,8 +65,8 @@ public class WestDragonsScript extends Script {
     @Override
     public boolean onStart() {
         ctx.log("=== West Dragons Slayer ===");
-        ctx.log("Eat at: " + EAT_AT_HP_PERCENT + "% hp");
-        ctx.log("Bank at: " + BANK_AT_INVENTORY_PERCENT + "% inventory");
+        ctx.log("Teleport spell: " + TELEPORT_SPELL);
+        ctx.log("Banking preset: " + BANK_PRESET);
         setStatus("Initializing...");
         return true;
     }
@@ -95,19 +74,14 @@ public class WestDragonsScript extends Script {
     @Override
     public int onProcess() {
         State state = determineState();
-
         switch (state) {
-            case SLAYING:
-                return handleSlaying();
-            case LOOTING:
-                return handleLooting();
-            case EATING:
-                return handleEating();
-            case BANKING:
-                return handleBanking();
-            case WALKING_TO_DRAGONS:
-            default:
-                return handleWalkingToDragons();
+            case SLAYING: return handleSlaying();
+            case LOOTING: return handleLooting();
+            case EATING: return handleEating();
+            case TELEPORTING: return handleTeleporting();
+            case BANKING: return handleBanking();
+            case WALKING_TO_DRAGONS: return handleWalkingToDragons();
+            default: return random(1000, 1500);
         }
     }
 
@@ -126,27 +100,10 @@ public class WestDragonsScript extends Script {
     // =========================================================================
 
     private State determineState() {
-        // Priority 1: eat if health is critical
-        if (shouldEat()) {
-            return State.EATING;
-        }
-
-        // Priority 2: bank if inventory is full
-        if (shouldBank()) {
-            return State.BANKING;
-        }
-
-        // Priority 3: loot if there are ground items nearby
-        if (findLoot() != null) {
-            return State.LOOTING;
-        }
-
-        // Priority 4: slay if not already in combat
-        if (findDragon() != null) {
-            return State.SLAYING;
-        }
-
-        // Priority 5: walk back to dragons if none are visible
+        if (shouldEat()) return State.EATING;
+        if (shouldBank()) return State.TELEPORTING;
+        if (findLoot() != null) return State.LOOTING;
+        if (findDragon() != null) return State.SLAYING;
         return State.WALKING_TO_DRAGONS;
     }
 
@@ -156,7 +113,6 @@ public class WestDragonsScript extends Script {
 
     private int handleSlaying() {
         KSNPC dragon = findDragon();
-
         if (dragon == null) {
             setStatus("Looking for dragons");
             return random(1000, 1500);
@@ -164,26 +120,21 @@ public class WestDragonsScript extends Script {
 
         if (!isIdle()) {
             setStatus("Fighting dragon");
-            lastCombatTime = System.currentTimeMillis();
-            inCombat = true;
             return random(800, 1400);
         }
 
         if (attackNpc(dragon)) {
+            dragonsKilled++;
             setStatus("Attacking dragon");
-            lastCombatTime = System.currentTimeMillis();
-            inCombat = true;
             return random(800, 1200);
         }
 
-        // Refused: blacklist and try another
         blacklistDragon(dragon);
         return random(400, 600);
     }
 
     private int handleLooting() {
         KSGroundItem loot = findLoot();
-
         if (loot == null) {
             setStatus("No loot nearby");
             return random(800, 1200);
@@ -200,31 +151,41 @@ public class WestDragonsScript extends Script {
 
     private int handleEating() {
         setStatus("Eating");
-
         if (eatFood()) {
             foodEaten++;
             return random(900, 1400);
         }
 
-        // Out of food - script will idle
         setStatus("Out of food");
         return random(2000, 3000);
     }
 
+    private int handleTeleporting() {
+        setStatus("Casting teleport");
+        if (castTeleportSpell()) {
+            ctx.log("Teleported. Waiting for load...");
+            ctx.sleep(1500, 2500);
+            return random(600, 1000);
+        }
+
+        return random(800, 1200);
+    }
+
     private int handleBanking() {
-        setStatus("Banking");
+        setStatus("Loading preset");
         bankTrips++;
 
-        // TODO: implement banking logic based on your server's bank location
-        // For now, just return to looking for dragons
-        return random(3000, 4000);
+        if (loadPreset(BANK_PRESET)) {
+            ctx.log("Preset loaded. Returning to dragons...");
+            ctx.sleep(1500, 2000);
+            return random(1000, 1500);
+        }
+
+        return random(800, 1200);
     }
 
     private int handleWalkingToDragons() {
         setStatus("Walking to dragons");
-
-        // TODO: implement walking logic to return to West Dragons
-        // For now, check if any dragons are visible
         if (findDragon() != null) {
             return random(600, 1000);
         }
@@ -248,27 +209,20 @@ public class WestDragonsScript extends Script {
 
     private KSGroundItem findLoot() {
         if (LOOT_PRIORITY.length == 0) {
-            // Loot everything - find any ground item
             return ctx.groundItems.query().closest();
         }
 
-        // Loot by priority
         for (String item : LOOT_PRIORITY) {
             KSGroundItem loot = ctx.groundItems.query()
                     .withName(item)
                     .closest();
-            if (loot != null) {
-                return loot;
-            }
+            if (loot != null) return loot;
         }
-
         return null;
     }
 
     private KSNPC findNpcByName(String name) {
-        return ctx.npcs.query()
-                .withName(name)
-                .closest();
+        return ctx.npcs.query().withName(name).closest();
     }
 
     private void blacklistDragon(KSNPC dragon) {
@@ -277,9 +231,7 @@ public class WestDragonsScript extends Script {
 
     private boolean isBlacklisted(KSNPC dragon) {
         Long until = dragonBlacklist.get(dragonKey(dragon));
-        if (until == null) {
-            return false;
-        }
+        if (until == null) return false;
         if (System.currentTimeMillis() > until) {
             dragonBlacklist.remove(dragonKey(dragon));
             return false;
@@ -288,7 +240,7 @@ public class WestDragonsScript extends Script {
     }
 
     private String dragonKey(KSNPC dragon) {
-        return npcPositionKey(dragon);
+        return dragon.getWorldLocation().toString();
     }
 
     private int random(int min, int max) {
@@ -298,16 +250,11 @@ public class WestDragonsScript extends Script {
     // =========================================================================
     // API ADAPTER
     // =========================================================================
-    // Everything below calls KSBot API. The logic above only depends on these
-    // wrappers, so API mismatches are one-line fixes here.
-    // =========================================================================
 
-    /** Check if the player is currently idle. */
     private boolean isIdle() {
         return ctx.players.getLocal().isIdle();
     }
 
-    /** Get current health as a percentage (0-100). */
     private int healthPercent() {
         return (int) ctx.combat.getHealthPercent();
     }
@@ -320,13 +267,11 @@ public class WestDragonsScript extends Script {
         return getInventoryPercent() >= BANK_AT_INVENTORY_PERCENT;
     }
 
-    /** Get inventory fullness as a percentage (0-100). */
     private int getInventoryPercent() {
         int count = ctx.inventory.size();
         return (count * 100) / 28;
     }
 
-    /** Attempt to eat food from inventory. */
     private boolean eatFood() {
         for (String food : FOOD) {
             if (ctx.inventory.getItem(food) != null
@@ -337,13 +282,28 @@ public class WestDragonsScript extends Script {
         return false;
     }
 
-    /** Attack an NPC. */
     private boolean attackNpc(KSNPC npc) {
         return npc != null && npc.interact("Attack");
     }
 
-    /** Get NPC position as a unique key. */
-    private String npcPositionKey(KSNPC npc) {
-        return npc.getWorldLocation().toString();
+    /** Cast the teleport spell by name. */
+    private boolean castTeleportSpell() {
+        try {
+            SpellBook.Standard spell = SpellBook.Standard.valueOf(TELEPORT_SPELL);
+            if (spell.canCast()) {
+                spell.cast();
+                return true;
+            }
+            ctx.log("Cannot cast " + TELEPORT_SPELL + " (insufficient runes or level)");
+            return false;
+        } catch (IllegalArgumentException e) {
+            ctx.log("Unknown spell: " + TELEPORT_SPELL);
+            return false;
+        }
+    }
+
+    /** Load a preset by name. */
+    private boolean loadPreset(String presetName) {
+        return ctx.presets.loadPreset(presetName);
     }
 }
