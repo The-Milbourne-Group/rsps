@@ -12,9 +12,8 @@ import rs.kreme.ksbot.api.wrappers.KSObject;
  * inventory fills up or supplies run out: home teleport -> bank booth ->
  * "Last-Preset" -> teleport back.
  *
- * Verify the four names in CONFIG against your server before running. Everything
- * else is resolved through the API rather than hardcoded, so it does not need
- * per-server tuning.
+ * Dragonfire is handled by wearing an anti-dragon shield, so there is no
+ * antifire potion handling here. The shield comes from the bank preset.
  */
 @ScriptManifest(
         name = "West Dragons",
@@ -37,8 +36,12 @@ public class WestDragonsScript extends Script {
 
     private static final String BANK_BOOTH_NAME = "Bank booth";
 
-    /** Destination in the teleport menu used to get back after restocking. */
-    private static final String DRAGON_DESTINATION = "Green dragons";
+    /**
+     * Destination in the teleport menu used to get back after restocking. The
+     * API's name matching is obfuscated, so whether it is case-sensitive could
+     * not be verified: if the return teleport never fires, try "West dragons".
+     */
+    private static final String DRAGON_DESTINATION = "west dragons";
 
     private static final int EAT_AT_HP_PERCENT = 50;
     private static final int DRINK_PRAYER_AT_PERCENT = 30;
