@@ -12,6 +12,10 @@ import rs.kreme.ksbot.api.wrappers.KSObject;
  * inventory fills up or supplies run out: home teleport -> bank booth ->
  * "Last-Preset" -> teleport back.
  *
+ * The script starts by running that same trip, so it can be started from
+ * anywhere and with anything in the inventory: it teleports home, loads the
+ * preset, and only then travels out to the dragons.
+ *
  * Dragonfire is handled by wearing an anti-dragon shield, so there is no
  * antifire potion handling here. The shield comes from the bank preset.
  */
@@ -61,9 +65,19 @@ public class WestDragonsScript extends Script {
     // RUNTIME STATE
     // =========================================================================
 
-    /** True from the moment supplies run short until we are back at the dragons. */
-    private boolean restocking = false;
+    /**
+     * True from the moment supplies run short until we are back at the dragons.
+     * Starts true so the first thing the script does is a full restock trip.
+     */
+    private boolean restocking = true;
     private boolean presetLoaded = false;
+
+    /**
+     * Forces the startup trip to begin with the home teleport even if the script
+     * was started standing at a bank booth, so the run always begins from a known
+     * location rather than wherever the player happened to be logged in.
+     */
+    private boolean startupTeleportPending = true;
 
     private int loots = 0;
     private int trips = 0;
@@ -78,6 +92,8 @@ public class WestDragonsScript extends Script {
         ctx.log("Target: " + DRAGON_NAME + " | Loot: " + LOOT_NAME + " (exact match only)");
         ctx.log("Restock trip: home teleport -> " + BANK_BOOTH_NAME
                 + " -> Last-Preset -> " + DRAGON_DESTINATION);
+        ctx.log("Starting with a restock trip.");
+        trips++;
         setStatus("Starting");
         return true;
     }
@@ -127,6 +143,7 @@ public class WestDragonsScript extends Script {
      */
     private State determineState() {
         if (restocking) {
+            if (startupTeleportPending)  return State.TELEPORTING_HOME;
             if (presetLoaded)            return State.RETURNING;
             if (ctx.bank.isOpen())       return State.LOADING_PRESET;
             if (findBankBooth() != null) return State.OPENING_BANK;
@@ -203,6 +220,7 @@ public class WestDragonsScript extends Script {
     private int handleTeleportHome() {
         setStatus("Teleporting home");
         if (ctx.magic.teleportHomeAndWait(TELEPORT_TIMEOUT_MS)) {
+            startupTeleportPending = false;
             return random(600, 1000);
         }
         return random(1000, 1600);

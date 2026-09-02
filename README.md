@@ -3,6 +3,9 @@
 Kills west dragons, loots only their bones, and restocks through a bank preset
 when supplies run out. Runs indefinitely.
 
+Start it anywhere: the first thing it does is teleport home and load the preset,
+so the run always begins from a known state.
+
 Source: [`src/WestDragonsScript.java`](src/WestDragonsScript.java)
 
 Written against the real API (`libs/rs.kreme.elorin-api.jar`), so every call is
@@ -11,11 +14,17 @@ verified rather than guessed. Compiles clean under `javac -Xlint:all`.
 ## The loop
 
 ```
-supplies OK  ->  kill dragon -> take bones -> repeat
-supplies out ->  home teleport -> bank booth -> Last-Preset -> teleport back
+on start    ->  home teleport -> bank booth -> Last-Preset -> teleport out
+supplies OK ->  kill dragon -> take bones -> repeat
+supplies out->  home teleport -> bank booth -> Last-Preset -> teleport back
 ```
 
-A restock trip starts when **any** of these is true:
+The script begins mid-restock rather than at the dragons, so it does not matter
+where it is started or what is in the inventory. The startup teleport fires even
+if it is started standing at a bank booth, so the run always begins from home
+rather than from wherever the player was logged in.
+
+After that, a restock trip starts when **any** of these is true:
 
 - the inventory is full
 - there is no food left
