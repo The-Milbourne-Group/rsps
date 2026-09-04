@@ -1,3 +1,4 @@
+import rs.kreme.ksbot.api.game.Prayer;
 import rs.kreme.ksbot.api.scripts.Category;
 import rs.kreme.ksbot.api.scripts.Script;
 import rs.kreme.ksbot.api.scripts.ScriptManifest;
@@ -5,298 +6,581 @@ import rs.kreme.ksbot.api.wrappers.KSGroundItem;
 import rs.kreme.ksbot.api.wrappers.KSNPC;
 import rs.kreme.ksbot.api.wrappers.KSObject;
 
-/**
- * West Dragons killer.
- *
- * Kill green dragons, loot only their bones, and run a restock trip whenever the
- * inventory fills up or supplies run out: home teleport -> bank booth ->
- * "Last-Preset" -> teleport back.
- *
- * The script starts by running that same trip, so it can be started from
- * anywhere and with anything in the inventory: it teleports home, loads the
- * preset, and only then travels out to the dragons.
- *
- * Dragonfire is handled by wearing an anti-dragon shield, so there is no
- * antifire potion handling here. The shield comes from the bank preset.
- */
 @ScriptManifest(
         name = "West Dragons",
         author = "YourName",
-        servers = { "osrs" },
-        description = "Kills west dragons, loots bones, restocks via bank preset.",
+        servers = {"osrs"},
+        description = "Fights green dragons, collects bones, banks, and recovers from failures",
         category = Category.COMBAT
 )
 public class WestDragonsScript extends Script {
 
-    // =========================================================================
-    // CONFIG - verify these four names against your server
-    // =========================================================================
-
-    /** Matched as a wildcard, so "Dragon" would also catch blues and reds. */
-    private static final String DRAGON_NAME = "Green dragon";
-
-    /** Matched exactly, so nothing else on the ground is ever picked up. */
-    private static final String LOOT_NAME = "Dragon bones";
-
-    private static final String BANK_BOOTH_NAME = "Bank booth";
-
-    /**
-     * Destination in the teleport menu used to get back after restocking. The
-     * API's name matching is obfuscated, so whether it is case-sensitive could
-     * not be verified: if the return teleport never fires, try "west dragons".
+    /*
+     * REGIONS
      */
-    private static final String DRAGON_DESTINATION = "West dragons";
+    private static final int HOME_REGION = 12342;
+    private static final int WEST_DRAGONS_REGION = 11832;
 
-    private static final int EAT_AT_HP_PERCENT = 50;
-    private static final int DRINK_PRAYER_AT_PERCENT = 30;
+    /*
+     * HEALTH / PRAYER
+     */
+    private static final int EAT_HEALTH = 60;
+    private static final int EMERGENCY_HEALTH = 35;
+    private static final int LOW_PRAYER = 30;
 
-    /** Only bones within this many tiles are collected. */
-    private static final int LOOT_RADIUS = 8;
+    /*
+     * INVENTORY
+     */
+    private static final int MIN_FOOD_TO_CONTINUE = 3;
 
-    private static final int TELEPORT_TIMEOUT_MS = 6000;
-    private static final int BANK_TIMEOUT_MS = 4000;
+    /*
+     * DISTANCES
+     */
+    private static final int BONE_DISTANCE = 12;
+    private static final int DRAGON_SEARCH_RADIUS = 50;
+    private static final int PKER_DETECTION_RADIUS = 3;
+
+    /*
+     * COOLDOWNS
+     */
+    private static final long HOME_COMMAND_COOLDOWN = 5000;
+    private static final long WEST_COMMAND_COOLDOWN = 5000;
+    private static final long PRESET_COOLDOWN = 3000;
+    private static final long ATTACK_COOLDOWN = 1200;
+    private static final long LOOT_COOLDOWN = 800;
+    private static final long PKER_COOLDOWN = 60000;
+
+    /*
+     * ANTI-STUCK
+     */
+    private static final long STUCK_TIMEOUT = 60000;
+
+    /*
+     * NAVIGATION
+     */
+    private static final int DRAGON_AREA_X = 2978;
+    private static final int DRAGON_AREA_Y = 3612;
 
     private enum State {
-        FIGHTING, LOOTING, SEARCHING,
-        TELEPORTING_HOME, OPENING_BANK, LOADING_PRESET, RETURNING
+        HOME,
+        FIGHTING,
+        LOOTING,
+        RETURNING,
+        RECOVERING
     }
 
-    // =========================================================================
-    // RUNTIME STATE
-    // =========================================================================
+    private State currentState = State.RECOVERING;
+    private KSNPC currentTarget = null;
 
-    /**
-     * True from the moment supplies run short until we are back at the dragons.
-     * Starts true so the first thing the script does is a full restock trip.
+    /*
+     * TIMERS
      */
-    private boolean restocking = true;
-    private boolean presetLoaded = false;
-
-    /**
-     * Forces the startup trip to begin with the home teleport even if the script
-     * was started standing at a bank booth, so the run always begins from a known
-     * location rather than wherever the player happened to be logged in.
-     */
-    private boolean startupTeleportPending = true;
-
-    private int loots = 0;
-    private int trips = 0;
-
-    // =========================================================================
-    // LIFECYCLE
-    // =========================================================================
+    private long lastHomeCommand = 0;
+    private long lastWestCommand = 0;
+    private long lastPresetAttempt = 0;
+    private long lastAttackAttempt = 0;
+    private long lastLootAttempt = 0;
+    private long lastProgressTime = 0;
+    private long lastPKerEncounter = 0;
 
     @Override
     public boolean onStart() {
-        ctx.log("=== West Dragons ===");
-        ctx.log("Target: " + DRAGON_NAME + " | Loot: " + LOOT_NAME + " (exact match only)");
-        ctx.log("Restock trip: home teleport -> " + BANK_BOOTH_NAME
-                + " -> Last-Preset -> " + DRAGON_DESTINATION);
-        ctx.log("Starting with a restock trip.");
-        trips++;
-        setStatus("Starting");
+
+        lastProgressTime = System.currentTimeMillis();
+
+        sendHome();
+
         return true;
     }
 
     @Override
     public int onProcess() {
-        // Survival runs in every state, including mid-trip. Both calls no-op when
-        // the threshold has not been reached.
-        if (ctx.consumables.eatAtPercent(EAT_AT_HP_PERCENT)) {
-            setStatus("Eating");
-            return random(600, 1000);
-        }
-        if (ctx.prayer.getPercentLeft() <= DRINK_PRAYER_AT_PERCENT
-                && ctx.consumables.drinkPrayer()) {
-            setStatus("Drinking prayer");
-            return random(600, 1000);
+
+        var local = ctx.players.getLocal();
+
+        if (local == null) {
+            ctx.log("Player logged out! Scheduling relog...");
+            ctx.scheduleRelog(1);
+            return 1000;
         }
 
-        switch (determineState()) {
-            case FIGHTING:          return handleFighting();
-            case LOOTING:           return handleLooting();
-            case TELEPORTING_HOME:  return handleTeleportHome();
-            case OPENING_BANK:      return handleOpenBank();
-            case LOADING_PRESET:    return handleLoadPreset();
-            case RETURNING:         return handleReturn();
-            case SEARCHING:
-            default:                return handleSearching();
+        long now = System.currentTimeMillis();
+
+        /*
+         * DETERMINE CURRENT STATE
+         */
+        if (ctx.pathing.inRegion(HOME_REGION)) {
+            currentState = State.HOME;
+
+        } else if (ctx.pathing.inRegion(WEST_DRAGONS_REGION)) {
+            currentState = State.FIGHTING;
+
+        } else {
+            currentState = State.RECOVERING;
         }
+
+        /*
+         * ANTI-STUCK CHECK
+         */
+        if (now - lastProgressTime > STUCK_TIMEOUT) {
+            currentState = State.RECOVERING;
+        }
+
+        /*
+         * PRIORITY 1:
+         * EMERGENCY HEALTH
+         */
+        if (ctx.combat.getCurrentHealth() <= EMERGENCY_HEALTH) {
+
+            eatIfPossible();
+
+            markProgress();
+
+            /*
+             * If emergency health remains a problem,
+             * return to the safe/home state.
+             */
+            if (ctx.combat.getCurrentHealth() <= EMERGENCY_HEALTH) {
+                sendHome();
+            }
+
+            return 1000;
+        }
+
+        /*
+         * PRIORITY 1.5:
+         * PKER DETECTION
+         */
+        if (ctx.pathing.inRegion(WEST_DRAGONS_REGION) && isPlayerNearby()) {
+
+            if (now - lastPKerEncounter >= PKER_COOLDOWN) {
+                ctx.log("PKer detected! Teleporting home and waiting 60 seconds...");
+                sendHome();
+                lastPKerEncounter = now;
+                return 3000;
+            } else {
+                /*
+                 * Still in cooldown, keep waiting
+                 */
+                return 2000;
+            }
+        }
+
+        /*
+         * PRIORITY 2:
+         * STATE HANDLING
+         */
+        switch (currentState) {
+
+            case HOME:
+                return handleHome();
+
+            case FIGHTING:
+                return handleFighting(local);
+
+            case RECOVERING:
+                return handleRecovery();
+
+            default:
+                return 1000;
+        }
+    }
+
+    /*
+     * HOME / BANK HANDLING
+     */
+    private int handleHome() {
+
+        /*
+         * If we have loot, bank it.
+         */
+        if (ctx.inventory.contains("Dragon bones")) {
+            if (preset()) {
+                markProgress();
+                return 2500;
+            }
+            return 1500;
+        }
+
+        /*
+         * If we are low/out of food, load the preset.
+         */
+        if (foodCount() < MIN_FOOD_TO_CONTINUE) {
+            if (preset()) {
+                markProgress();
+                return 2500;
+            }
+            return 1500;
+        }
+
+        /*
+         * We have supplies and no bones.
+         * Travel to West Dragons.
+         */
+        sendWest();
+
+        return 2000;
+    }
+
+    /*
+     * DRAGON REGION
+     */
+    private int handleFighting(Object localPlayer) {
+
+        /*
+         * PRIORITY 1:
+         * MAKE SURE WE HAVE ENOUGH FOOD
+         */
+        if (foodCount() < MIN_FOOD_TO_CONTINUE) {
+            sendHome();
+            return 1500;
+        }
+
+        /*
+         * PRIORITY 2:
+         * INVENTORY FULL
+         */
+        if (ctx.inventory.isFull()) {
+            sendHome();
+            return 1500;
+        }
+
+        /*
+         * PRIORITY 3:
+         * PRAYER
+         */
+        ctx.prayer.enable(Prayer.Prayers.PROTECT_FROM_MELEE);
+
+        if (ctx.prayer.getPoints() < LOW_PRAYER) {
+
+            ctx.consumables.drinkPrayer();
+
+            markProgress();
+
+            return 800;
+        }
+
+        /*
+         * PRIORITY 4:
+         * EAT WHEN NECESSARY
+         */
+        if (ctx.combat.getCurrentHealth() < EAT_HEALTH) {
+
+            eatIfPossible();
+
+            return 800;
+        }
+
+        /*
+         * PRIORITY 5:
+         * LOOT
+         */
+        long now = System.currentTimeMillis();
+
+        if (now - lastLootAttempt >= LOOT_COOLDOWN) {
+
+            KSGroundItem bones = ctx.groundItems.query()
+                    .withExactName("Dragon bones")
+                    .closest();
+
+            if (bones != null
+                    && !ctx.inventory.isFull()) {
+
+                if (ctx.pathing.distanceTo(bones) <= BONE_DISTANCE) {
+
+                    lastLootAttempt = now;
+
+                    bones.interact("Take");
+
+                    markProgress();
+
+                    return 1000;
+                }
+            }
+        }
+
+        /*
+         * PRIORITY 6:
+         * FIND AVAILABLE DRAGON (not in combat)
+         */
+        KSNPC dragon = findAvailableDragon();
+
+        if (dragon == null) {
+
+            ctx.pathing.walkPoint(
+                    DRAGON_AREA_X,
+                    DRAGON_AREA_Y
+            );
+
+            markProgress();
+
+            return 1500;
+        }
+
+        /*
+         * PRIORITY 7:
+         * COMBAT VERIFICATION
+         */
+        if (now - lastAttackAttempt >= ATTACK_COOLDOWN) {
+
+            if (isAlreadyAttacking()) {
+                return 800;
+            }
+
+            if (isDragonInCombat(dragon)) {
+                return 800;
+            }
+
+            dragon.interact("Attack");
+            currentTarget = dragon;
+
+            lastAttackAttempt = now;
+
+            markProgress();
+
+            return 1200;
+        }
+
+        return 800;
+    }
+
+    /*
+     * RECOVERY / FAILURE HANDLING
+     */
+    private int handleRecovery() {
+
+        sendHome();
+
+        return 3000;
+    }
+
+    /*
+     * FIND AN AVAILABLE DRAGON WITHIN 24 TILE RADIUS
+     */
+    private KSNPC findAvailableDragon() {
+
+        var dragons = ctx.npcs.query()
+                .withName("Green dragon")
+                .list();
+
+        if (dragons == null || dragons.isEmpty()) {
+            return null;
+        }
+
+        var local = ctx.players.getLocal();
+        if (local == null) {
+            return null;
+        }
+
+        KSNPC closestAvailable = null;
+        int closestDistance = Integer.MAX_VALUE;
+
+        for (KSNPC dragon : dragons) {
+            if (dragon == null) {
+                continue;
+            }
+
+            int distance = ctx.pathing.distanceTo(dragon);
+
+            if (distance > 24) {
+                continue;
+            }
+
+            if (!isDragonInCombat(dragon)) {
+                if (distance < closestDistance) {
+                    closestAvailable = dragon;
+                    closestDistance = distance;
+                }
+            }
+        }
+
+        return closestAvailable;
+    }
+
+    /*
+     * CHECK IF DRAGON IS IN COMBAT
+     */
+    private boolean isDragonInCombat(KSNPC dragon) {
+
+        if (dragon == null) {
+            return false;
+        }
+
+        try {
+            var interacting = dragon.getInteracting();
+
+            if (interacting != null) {
+                return true;
+            }
+
+        } catch (Exception e) {
+            return false;
+        }
+
+        return false;
+    }
+
+    /*
+     * CHECK IF WE ARE ALREADY ATTACKING
+     */
+    private boolean isAlreadyAttacking() {
+
+        try {
+            var local = ctx.players.getLocal();
+
+            if (local == null) {
+                return false;
+            }
+
+            var interacting = local.getInteracting();
+
+            return interacting != null;
+
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /*
+     * CHECK FOR PKERS (players with skull nearby)
+     */
+    private boolean isPlayerNearby() {
+
+        if (!ctx.pathing.inRegion(WEST_DRAGONS_REGION)) {
+            return false;
+        }
+
+        try {
+            var players = ctx.players.query().list();
+
+            if (players == null || players.isEmpty()) {
+                return false;
+            }
+
+            var local = ctx.players.getLocal();
+            if (local == null) {
+                return false;
+            }
+
+            for (var player : players) {
+                if (player == null || player.equals(local)) {
+                    continue;
+                }
+
+                int distance = ctx.pathing.distanceTo(player);
+
+                if (distance <= PKER_DETECTION_RADIUS) {
+                    if (player.getSkullIcon() != null) {
+                        return true;
+                    }
+                }
+            }
+
+        } catch (Exception e) {
+            return false;
+        }
+
+        return false;
+    }
+
+    /*
+     * LAST PRESET
+     */
+    private boolean preset() {
+
+        long now = System.currentTimeMillis();
+
+        if (now - lastPresetAttempt < PRESET_COOLDOWN) {
+            return false;
+        }
+
+        KSObject bank = ctx.groundObjects.query()
+                .withName("Bank booth")
+                .closest();
+
+        if (bank == null) {
+            return false;
+        }
+
+        lastPresetAttempt = now;
+
+        boolean interacted = bank.interact("Last-preset");
+
+        if (interacted) {
+            ctx.log("Preset loaded successfully");
+            markProgress();
+            return true;
+        }
+
+        ctx.log("Preset failed to load, will retry");
+        return false;
+    }
+
+    /*
+     * SEND HOME WITH COOLDOWN
+     */
+    private void sendHome() {
+
+        long now = System.currentTimeMillis();
+
+        if (now - lastHomeCommand < HOME_COMMAND_COOLDOWN) {
+            return;
+        }
+
+        ctx.chat.sendCommand("home");
+
+        lastHomeCommand = now;
+
+        markProgress();
+    }
+
+    /*
+     * SEND TO WEST DRAGONS WITH COOLDOWN
+     */
+    private void sendWest() {
+
+        long now = System.currentTimeMillis();
+
+        if (now - lastWestCommand < WEST_COMMAND_COOLDOWN) {
+            return;
+        }
+
+        ctx.chat.sendCommand("wests");
+
+        lastWestCommand = now;
+
+        markProgress();
+    }
+
+    /*
+     * EAT FOOD
+     */
+    private void eatIfPossible() {
+
+        if (ctx.inventory.contains("Shark")) {
+
+            ctx.consumables.eat("Shark");
+
+            markProgress();
+        }
+    }
+
+    /*
+     * FOOD COUNT
+     */
+    private int foodCount() {
+
+        return ctx.inventory.contains("Shark") ? MIN_FOOD_TO_CONTINUE : 0;
+    }
+
+    /*
+     * RECORD MEANINGFUL PROGRESS
+     */
+    private void markProgress() {
+        lastProgressTime = System.currentTimeMillis();
     }
 
     @Override
     public void onStop() {
-        ctx.log("=== Session summary ===");
-        ctx.log("Runtime:        " + getTimer().getElapsedTime());
-        ctx.log("Bones looted:   " + loots);
-        ctx.log("Restock trips:  " + trips);
-    }
-
-    // =========================================================================
-    // STATE DETECTION
-    // =========================================================================
-
-    /**
-     * A restock trip is a flag rather than a screen test: "standing at home with a
-     * full inventory" and "standing at home having just restocked" look identical,
-     * so the trip has to remember which half of it we are in.
-     */
-    private State determineState() {
-        if (restocking) {
-            if (startupTeleportPending)  return State.TELEPORTING_HOME;
-            if (presetLoaded)            return State.RETURNING;
-            if (ctx.bank.isOpen())       return State.LOADING_PRESET;
-            if (findBankBooth() != null) return State.OPENING_BANK;
-            return State.TELEPORTING_HOME;
-        }
-
-        if (needsRestock()) {
-            restocking = true;
-            presetLoaded = false;
-            trips++;
-            ctx.log("Restocking: " + restockReason());
-            return State.TELEPORTING_HOME;
-        }
-
-        if (findLoot() != null)   return State.LOOTING;
-        if (findDragon() != null) return State.FIGHTING;
-        return State.SEARCHING;
-    }
-
-    /** Any one of these ends the trip at the dragons. */
-    private boolean needsRestock() {
-        return ctx.inventory.isFull()
-                || !ctx.consumables.hasFood()
-                || !ctx.consumables.hasPrayer();
-    }
-
-    private String restockReason() {
-        if (ctx.inventory.isFull())        return "inventory full";
-        if (!ctx.consumables.hasFood())    return "out of food";
-        return "out of prayer potions";
-    }
-
-    // =========================================================================
-    // AT THE DRAGONS
-    // =========================================================================
-
-    private int handleFighting() {
-        if (!ctx.players.getLocal().isIdle()) {
-            setStatus("Fighting");
-            return random(700, 1200);
-        }
-
-        KSNPC dragon = findDragon();
-        if (dragon != null && dragon.interact("Attack")) {
-            setStatus("Attacking");
-            return random(800, 1300);
-        }
-        return random(500, 900);
-    }
-
-    /**
-     * Bones are taken before the next dragon is engaged, so a full kill's drop is
-     * never left behind while a new fight starts.
-     */
-    private int handleLooting() {
-        KSGroundItem bones = findLoot();
-        if (bones != null && bones.interact("Take")) {
-            loots++;
-            setStatus("Looting bones");
-            return random(600, 1000);
-        }
-        return random(400, 800);
-    }
-
-    private int handleSearching() {
-        setStatus("Looking for dragons");
-        return random(1000, 1800);
-    }
-
-    // =========================================================================
-    // RESTOCK TRIP
-    // =========================================================================
-
-    private int handleTeleportHome() {
-        setStatus("Teleporting home");
-        if (ctx.magic.teleportHomeAndWait(TELEPORT_TIMEOUT_MS)) {
-            startupTeleportPending = false;
-            return random(600, 1000);
-        }
-        return random(1000, 1600);
-    }
-
-    /**
-     * Most servers put "Last-Preset" straight on the booth, which restocks in one
-     * click. Where they do not, the bank is opened and the preset applied from
-     * inside it instead.
-     */
-    private int handleOpenBank() {
-        KSObject booth = findBankBooth();
-        if (booth == null) {
-            return random(800, 1200);
-        }
-
-        if (booth.hasAction("Last-Preset")) {
-            setStatus("Booth: Last-Preset");
-            if (booth.interact("Last-Preset")) {
-                presetLoaded = true;
-                ctx.sleep(1200, 1800);
-                return random(600, 1000);
-            }
-        }
-
-        setStatus("Opening bank");
-        if (booth.interact("Bank")) {
-            ctx.sleep(1000, 1600);
-        }
-        return random(600, 1000);
-    }
-
-    private int handleLoadPreset() {
-        setStatus("Loading last preset");
-        if (ctx.presets.lastPreset()) {
-            presetLoaded = true;
-            ctx.sleep(1200, 1800);
-            ctx.bank.closeAndWait(BANK_TIMEOUT_MS);
-            return random(600, 1000);
-        }
-        return random(600, 1000);
-    }
-
-    private int handleReturn() {
-        setStatus("Returning to dragons");
-        if (ctx.teleporter.teleportAndWait(TELEPORT_TIMEOUT_MS, DRAGON_DESTINATION)) {
-            restocking = false;
-            presetLoaded = false;
-            ctx.log("Back at the dragons.");
-            return random(800, 1400);
-        }
-        return random(1000, 1600);
-    }
-
-    // =========================================================================
-    // LOOKUPS
-    // =========================================================================
-
-    private KSNPC findDragon() {
-        return ctx.npcs.query().withName(DRAGON_NAME).alive().closest();
-    }
-
-    /** Exact name match, so only dragon bones are ever taken. */
-    private KSGroundItem findLoot() {
-        KSGroundItem bones = ctx.groundItems.query().withExactName(LOOT_NAME).closest();
-        if (bones == null || ctx.inventory.isFull()) {
-            return null;
-        }
-        return bones.distanceTo(ctx.players.getLocal()) <= LOOT_RADIUS ? bones : null;
-    }
-
-    private KSObject findBankBooth() {
-        return ctx.groundObjects.query().withName(BANK_BOOTH_NAME).closest();
-    }
-
-    private int random(int min, int max) {
-        return min + (int) (Math.random() * (max - min));
     }
 }
