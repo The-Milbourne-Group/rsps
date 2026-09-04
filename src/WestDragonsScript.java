@@ -118,7 +118,7 @@ public class WestDragonsScript extends Script {
 
         lastProgressTime = System.currentTimeMillis();
 
-        initializeGUI();
+        SwingUtilities.invokeLater(this::initializeGUI);
 
         sendHome();
 
