@@ -49,6 +49,14 @@ public class WestDragonsScript extends Script {
     private static final long ATTACK_COOLDOWN = 1200;
     private static final long LOOT_COOLDOWN = 800;
     private static final long PKER_COOLDOWN = 60000;
+    private static final long TRADE_COOLDOWN = 2000;
+
+    /*
+     * TRADING
+     */
+    private static final String TRADE_PARTNER = "Market";
+    private static final int BONES_TO_TRADE = 250;
+    private static final int BONES_BANK_THRESHOLD = 250;
 
     /*
      * ANTI-STUCK
@@ -66,7 +74,9 @@ public class WestDragonsScript extends Script {
         FIGHTING,
         LOOTING,
         RETURNING,
-        RECOVERING
+        RECOVERING,
+        TRADING,
+        WAITING_FOR_PARTNER
     }
 
     private State currentState = State.RECOVERING;
@@ -82,6 +92,14 @@ public class WestDragonsScript extends Script {
     private long lastLootAttempt = 0;
     private long lastProgressTime = 0;
     private long lastPKerEncounter = 0;
+    private long lastTradeAttempt = 0;
+    private long lastBankCheck = 0;
+
+    /*
+     * TRADING STATE
+     */
+    private int bonesInBank = 0;
+    private boolean tradeInitiated = false;
 
     @Override
     public boolean onStart() {
@@ -181,6 +199,12 @@ public class WestDragonsScript extends Script {
             case RECOVERING:
                 return handleRecovery();
 
+            case TRADING:
+                return handleTrade();
+
+            case WAITING_FOR_PARTNER:
+                return handleWaitingForPartner();
+
             default:
                 return 1000;
         }
@@ -190,6 +214,31 @@ public class WestDragonsScript extends Script {
      * HOME / BANK HANDLING
      */
     private int handleHome() {
+
+        long now = System.currentTimeMillis();
+
+        /*
+         * CHECK BANK FOR BONES TO TRADE
+         */
+        if (now - lastBankCheck >= 3000) {
+            lastBankCheck = now;
+
+            if (!ctx.bank.isOpen()) {
+                ctx.bank.open();
+                return 2000;
+            }
+
+            bonesInBank = ctx.bank.getCount("Dragon bones");
+            ctx.log("Bones in bank: " + bonesInBank);
+
+            if (bonesInBank >= BONES_BANK_THRESHOLD) {
+                ctx.log("Enough bones for trade! Moving to trade...");
+                ctx.bank.close();
+                currentState = State.WAITING_FOR_PARTNER;
+                tradeInitiated = false;
+                return 2000;
+            }
+        }
 
         /*
          * If we have loot, bank it.
@@ -578,6 +627,108 @@ public class WestDragonsScript extends Script {
      */
     private void markProgress() {
         lastProgressTime = System.currentTimeMillis();
+    }
+
+    /*
+     * WAITING FOR TRADE PARTNER
+     */
+    private int handleWaitingForPartner() {
+
+        var players = ctx.players.query().list();
+
+        if (players == null || players.isEmpty()) {
+            ctx.log("No players found, waiting...");
+            return 2000;
+        }
+
+        for (var player : players) {
+            if (player == null || player.getName() == null) {
+                continue;
+            }
+
+            if (player.getName().equalsIgnoreCase(TRADE_PARTNER)) {
+                ctx.log("Found trade partner: " + TRADE_PARTNER);
+                currentState = State.TRADING;
+                return 1000;
+            }
+        }
+
+        ctx.log("Waiting for " + TRADE_PARTNER + "...");
+        return 3000;
+    }
+
+    /*
+     * HANDLE TRADE
+     */
+    private int handleTrade() {
+
+        long now = System.currentTimeMillis();
+
+        if (now - lastTradeAttempt < TRADE_COOLDOWN) {
+            return 800;
+        }
+
+        var players = ctx.players.query().list();
+
+        if (players == null || players.isEmpty()) {
+            ctx.log("Partner disconnected!");
+            currentState = State.HOME;
+            tradeInitiated = false;
+            return 2000;
+        }
+
+        for (var player : players) {
+            if (player == null || player.getName() == null) {
+                continue;
+            }
+
+            if (player.getName().equalsIgnoreCase(TRADE_PARTNER)) {
+                if (!tradeInitiated) {
+                    ctx.log("Initiating trade with " + TRADE_PARTNER);
+                    player.interact("Trade");
+                    lastTradeAttempt = now;
+                    tradeInitiated = true;
+                    return 2000;
+                }
+
+                if (ctx.trade.isOpen()) {
+                    int bonesInInventory = ctx.inventory.getCount("Dragon bones");
+
+                    if (bonesInInventory < BONES_TO_TRADE) {
+                        ctx.log("Withdrawing bones from bank...");
+                        ctx.trade.decline();
+                        ctx.bank.open();
+                        return 2000;
+                    }
+
+                    if (!ctx.trade.hasOffered("Dragon bones", BONES_TO_TRADE)) {
+                        ctx.log("Offering " + BONES_TO_TRADE + " dragon bones...");
+                        ctx.trade.offer("Dragon bones", BONES_TO_TRADE);
+                        return 2000;
+                    }
+
+                    if (ctx.trade.otherPlayerAccepted()) {
+                        ctx.log("Accepting trade...");
+                        ctx.trade.accept();
+                        return 2000;
+                    }
+
+                    if (ctx.trade.isOnFinalScreen()) {
+                        ctx.log("Confirming final trade...");
+                        ctx.trade.accept();
+                        markProgress();
+                        return 3000;
+                    }
+                }
+
+                return 1000;
+            }
+        }
+
+        ctx.log("Partner not found, returning to home...");
+        currentState = State.HOME;
+        tradeInitiated = false;
+        return 2000;
     }
 
     @Override
