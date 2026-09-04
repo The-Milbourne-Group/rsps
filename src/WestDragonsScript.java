@@ -41,7 +41,6 @@ public class WestDragonsScript extends Script {
      * DISTANCES
      */
     private static final int BONE_DISTANCE = 12;
-    private static final int DRAGON_SEARCH_RADIUS = 50;
     private static final int PKER_DETECTION_RADIUS = 3;
 
     /*
@@ -84,7 +83,6 @@ public class WestDragonsScript extends Script {
     }
 
     private State currentState = State.RECOVERING;
-    private KSNPC currentTarget = null;
 
     /*
      * TIMERS
@@ -326,7 +324,7 @@ public class WestDragonsScript extends Script {
                 return handleHome();
 
             case FIGHTING:
-                return handleFighting(local);
+                return handleFighting();
 
             case RECOVERING:
                 return handleRecovery();
@@ -355,20 +353,16 @@ public class WestDragonsScript extends Script {
         if (now - lastBankCheck >= 3000) {
             lastBankCheck = now;
 
-            if (!ctx.bank.isOpen()) {
-                ctx.bank.open();
-                return 2000;
-            }
+            if (ctx.bank.isOpen()) {
+                bonesInBank = ctx.bank.getCount("Dragon bones");
+                ctx.log("Bones in bank: " + bonesInBank);
 
-            bonesInBank = ctx.bank.getCount("Dragon bones");
-            ctx.log("Bones in bank: " + bonesInBank);
-
-            if (bonesInBank >= BONES_BANK_THRESHOLD) {
-                ctx.log("Enough bones for trade! Moving to trade...");
-                ctx.bank.close();
-                currentState = State.WAITING_FOR_PARTNER;
-                tradeInitiated = false;
-                return 2000;
+                if (bonesInBank >= BONES_BANK_THRESHOLD) {
+                    ctx.log("Enough bones for trade! Moving to trade...");
+                    currentState = State.WAITING_FOR_PARTNER;
+                    tradeInitiated = false;
+                    return 2000;
+                }
             }
         }
 
@@ -406,7 +400,7 @@ public class WestDragonsScript extends Script {
     /*
      * DRAGON REGION
      */
-    private int handleFighting(Object localPlayer) {
+    private int handleFighting() {
 
         /*
          * PRIORITY 1:
@@ -826,39 +820,24 @@ public class WestDragonsScript extends Script {
                     return 2000;
                 }
 
-                if (ctx.trade.isOpen()) {
-                    int bonesInInventory = ctx.inventory.getCount("Dragon bones");
+                try {
+                    if (ctx.trade.isOpen()) {
+                        int bonesInInventory = ctx.inventory.getCount("Dragon bones");
 
-                    if (bonesInInventory < BONES_TO_TRADE) {
-                        ctx.log("Withdrawing bones from bank...");
-                        ctx.trade.decline();
-                        ctx.bank.open();
-                        return 2000;
-                    }
+                        if (bonesInInventory < BONES_TO_TRADE) {
+                            ctx.log("Not enough bones in inventory, returning to home");
+                            currentState = State.HOME;
+                            tradeInitiated = false;
+                            return 2000;
+                        }
 
-                    if (!ctx.trade.hasOffered("Dragon bones", BONES_TO_TRADE)) {
                         ctx.log("Offering " + BONES_TO_TRADE + " dragon bones...");
                         ctx.trade.offer("Dragon bones", BONES_TO_TRADE);
+
                         return 2000;
                     }
-
-                    if (ctx.trade.otherPlayerAccepted()) {
-                        ctx.log("Accepting trade...");
-                        ctx.trade.accept();
-                        return 2000;
-                    }
-
-                    if (ctx.trade.isOnFinalScreen()) {
-                        ctx.log("Confirming final trade...");
-                        ctx.trade.accept();
-                        markProgress();
-
-                        bonesCollected = 0;
-                        ctx.log("Trade complete! Counter reset to 0");
-                        updateGUI();
-
-                        return 3000;
-                    }
+                } catch (Exception e) {
+                    ctx.log("Trade error: " + e.getMessage());
                 }
 
                 return 1000;
@@ -868,6 +847,11 @@ public class WestDragonsScript extends Script {
         ctx.log("Partner not found, returning to home...");
         currentState = State.HOME;
         tradeInitiated = false;
+
+        bonesCollected = 0;
+        ctx.log("Trade complete! Counter reset to 0");
+        updateGUI();
+
         return 2000;
     }
 
