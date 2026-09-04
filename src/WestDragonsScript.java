@@ -5,6 +5,10 @@ import rs.kreme.ksbot.api.scripts.ScriptManifest;
 import rs.kreme.ksbot.api.wrappers.KSGroundItem;
 import rs.kreme.ksbot.api.wrappers.KSNPC;
 import rs.kreme.ksbot.api.wrappers.KSObject;
+import javax.swing.*;
+import javax.swing.border.LineBorder;
+import java.awt.*;
+import java.awt.event.ActionEvent;
 
 @ScriptManifest(
         name = "West Dragons",
@@ -101,14 +105,129 @@ public class WestDragonsScript extends Script {
     private int bonesInBank = 0;
     private boolean tradeInitiated = false;
 
+    /*
+     * GUI TRACKING
+     */
+    private int bonesCollected = 0;
+    private JFrame guiFrame = null;
+    private JLabel bonesLabel = null;
+    private JLabel statusLabel = null;
+    private JButton tradeButton = null;
+    private boolean forceTradeFlag = false;
+
     @Override
     public boolean onStart() {
 
         lastProgressTime = System.currentTimeMillis();
 
+        initializeGUI();
+
         sendHome();
 
         return true;
+    }
+
+    /*
+     * INITIALIZE GUI
+     */
+    private void initializeGUI() {
+
+        guiFrame = new JFrame("Dragon Bones Tracker");
+        guiFrame.setDefaultCloseOperation(JFrame.DO_NOTHING_ON_CLOSE);
+        guiFrame.setSize(300, 180);
+        guiFrame.setLocationRelativeTo(null);
+        guiFrame.setAlwaysOnTop(true);
+
+        JPanel panel = new JPanel();
+        panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
+        panel.setBorder(new LineBorder(Color.BLACK, 2));
+        panel.setBackground(new Color(50, 50, 50));
+
+        bonesLabel = new JLabel("Bones Collected: 0 / " + BONES_TO_TRADE);
+        bonesLabel.setForeground(Color.WHITE);
+        bonesLabel.setFont(new Font("Arial", Font.BOLD, 14));
+        bonesLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
+
+        statusLabel = new JLabel("Status: Fighting");
+        statusLabel.setForeground(Color.CYAN);
+        statusLabel.setFont(new Font("Arial", Font.PLAIN, 12));
+        statusLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
+
+        JPanel buttonPanel = new JPanel();
+        buttonPanel.setBackground(new Color(50, 50, 50));
+
+        tradeButton = new JButton("Initiate Trade");
+        tradeButton.setBackground(new Color(34, 139, 34));
+        tradeButton.setForeground(Color.WHITE);
+        tradeButton.setFont(new Font("Arial", Font.BOLD, 12));
+        tradeButton.addActionListener(e -> {
+            forceTradeFlag = true;
+            ctx.log("Trade manually initiated via GUI");
+        });
+
+        JButton resetButton = new JButton("Reset Counter");
+        resetButton.setBackground(new Color(139, 69, 19));
+        resetButton.setForeground(Color.WHITE);
+        resetButton.setFont(new Font("Arial", Font.BOLD, 12));
+        resetButton.addActionListener(e -> {
+            bonesCollected = 0;
+            updateGUI();
+            ctx.log("Counter reset to 0");
+        });
+
+        buttonPanel.add(tradeButton);
+        buttonPanel.add(resetButton);
+
+        panel.add(Box.createVerticalStrut(10));
+        panel.add(bonesLabel);
+        panel.add(Box.createVerticalStrut(5));
+        panel.add(statusLabel);
+        panel.add(Box.createVerticalStrut(10));
+        panel.add(buttonPanel);
+        panel.add(Box.createVerticalStrut(10));
+
+        guiFrame.add(panel);
+        guiFrame.setVisible(true);
+    }
+
+    /*
+     * UPDATE GUI DISPLAY
+     */
+    private void updateGUI() {
+
+        if (bonesLabel != null) {
+            bonesLabel.setText("Bones Collected: " + bonesCollected + " / " + BONES_TO_TRADE);
+
+            if (bonesCollected >= BONES_TO_TRADE) {
+                bonesLabel.setForeground(new Color(0, 255, 0));
+            } else {
+                bonesLabel.setForeground(Color.WHITE);
+            }
+        }
+
+        if (statusLabel != null) {
+            String status = "";
+            switch (currentState) {
+                case FIGHTING:
+                    status = "Status: Fighting";
+                    break;
+                case HOME:
+                    status = "Status: Banking";
+                    break;
+                case TRADING:
+                    status = "Status: Trading";
+                    break;
+                case WAITING_FOR_PARTNER:
+                    status = "Status: Waiting for Partner";
+                    break;
+                case RECOVERING:
+                    status = "Status: Recovering";
+                    break;
+                default:
+                    status = "Status: " + currentState;
+            }
+            statusLabel.setText(status);
+        }
     }
 
     @Override
@@ -122,7 +241,20 @@ public class WestDragonsScript extends Script {
             return 1000;
         }
 
+        updateGUI();
+
         long now = System.currentTimeMillis();
+
+        /*
+         * CHECK IF BONE LIMIT REACHED OR MANUAL TRADE INITIATED
+         */
+        if ((bonesCollected >= BONES_TO_TRADE || forceTradeFlag) && currentState != State.TRADING && currentState != State.WAITING_FOR_PARTNER) {
+            ctx.log("Bone limit reached! Initiating trade...");
+            currentState = State.WAITING_FOR_PARTNER;
+            tradeInitiated = false;
+            forceTradeFlag = false;
+            return 2000;
+        }
 
         /*
          * DETERMINE CURRENT STATE
@@ -338,6 +470,9 @@ public class WestDragonsScript extends Script {
                 if (ctx.pathing.distanceTo(bones) <= BONE_DISTANCE) {
 
                     lastLootAttempt = now;
+
+                    bonesCollected++;
+                    ctx.log("Bones collected: " + bonesCollected);
 
                     bones.interact("Take");
 
@@ -717,6 +852,11 @@ public class WestDragonsScript extends Script {
                         ctx.log("Confirming final trade...");
                         ctx.trade.accept();
                         markProgress();
+
+                        bonesCollected = 0;
+                        ctx.log("Trade complete! Counter reset to 0");
+                        updateGUI();
+
                         return 3000;
                     }
                 }
@@ -733,5 +873,8 @@ public class WestDragonsScript extends Script {
 
     @Override
     public void onStop() {
+        if (guiFrame != null) {
+            guiFrame.dispose();
+        }
     }
 }
