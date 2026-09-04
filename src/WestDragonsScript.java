@@ -5,10 +5,6 @@ import rs.kreme.ksbot.api.scripts.ScriptManifest;
 import rs.kreme.ksbot.api.wrappers.KSGroundItem;
 import rs.kreme.ksbot.api.wrappers.KSNPC;
 import rs.kreme.ksbot.api.wrappers.KSObject;
-import javax.swing.*;
-import javax.swing.border.LineBorder;
-import java.awt.*;
-import java.awt.event.ActionEvent;
 
 @ScriptManifest(
         name = "West Dragons",
@@ -41,7 +37,7 @@ public class WestDragonsScript extends Script {
      * DISTANCES
      */
     private static final int BONE_DISTANCE = 12;
-    private static final int PKER_DETECTION_RADIUS = 3;
+    private static final int DRAGON_SEARCH_RADIUS = 50;
 
     /*
      * COOLDOWNS
@@ -51,7 +47,6 @@ public class WestDragonsScript extends Script {
     private static final long PRESET_COOLDOWN = 3000;
     private static final long ATTACK_COOLDOWN = 1200;
     private static final long LOOT_COOLDOWN = 800;
-    private static final long PKER_COOLDOWN = 60000;
     private static final long TRADE_COOLDOWN = 2000;
 
     /*
@@ -83,6 +78,7 @@ public class WestDragonsScript extends Script {
     }
 
     private State currentState = State.RECOVERING;
+    private KSNPC currentTarget = null;
 
     /*
      * TIMERS
@@ -93,7 +89,6 @@ public class WestDragonsScript extends Script {
     private long lastAttackAttempt = 0;
     private long lastLootAttempt = 0;
     private long lastProgressTime = 0;
-    private long lastPKerEncounter = 0;
     private long lastTradeAttempt = 0;
     private long lastBankCheck = 0;
 
@@ -103,129 +98,14 @@ public class WestDragonsScript extends Script {
     private int bonesInBank = 0;
     private boolean tradeInitiated = false;
 
-    /*
-     * GUI TRACKING
-     */
-    private int bonesCollected = 0;
-    private JFrame guiFrame = null;
-    private JLabel bonesLabel = null;
-    private JLabel statusLabel = null;
-    private JButton tradeButton = null;
-    private boolean forceTradeFlag = false;
-
     @Override
     public boolean onStart() {
 
         lastProgressTime = System.currentTimeMillis();
 
-        SwingUtilities.invokeLater(this::initializeGUI);
-
         sendHome();
 
         return true;
-    }
-
-    /*
-     * INITIALIZE GUI
-     */
-    private void initializeGUI() {
-
-        guiFrame = new JFrame("Dragon Bones Tracker");
-        guiFrame.setDefaultCloseOperation(JFrame.DO_NOTHING_ON_CLOSE);
-        guiFrame.setSize(300, 180);
-        guiFrame.setLocationRelativeTo(null);
-        guiFrame.setAlwaysOnTop(true);
-
-        JPanel panel = new JPanel();
-        panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
-        panel.setBorder(new LineBorder(Color.BLACK, 2));
-        panel.setBackground(new Color(50, 50, 50));
-
-        bonesLabel = new JLabel("Bones Collected: 0 / " + BONES_TO_TRADE);
-        bonesLabel.setForeground(Color.WHITE);
-        bonesLabel.setFont(new Font("Arial", Font.BOLD, 14));
-        bonesLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
-
-        statusLabel = new JLabel("Status: Fighting");
-        statusLabel.setForeground(Color.CYAN);
-        statusLabel.setFont(new Font("Arial", Font.PLAIN, 12));
-        statusLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
-
-        JPanel buttonPanel = new JPanel();
-        buttonPanel.setBackground(new Color(50, 50, 50));
-
-        tradeButton = new JButton("Initiate Trade");
-        tradeButton.setBackground(new Color(34, 139, 34));
-        tradeButton.setForeground(Color.WHITE);
-        tradeButton.setFont(new Font("Arial", Font.BOLD, 12));
-        tradeButton.addActionListener(e -> {
-            forceTradeFlag = true;
-            ctx.log("Trade manually initiated via GUI");
-        });
-
-        JButton resetButton = new JButton("Reset Counter");
-        resetButton.setBackground(new Color(139, 69, 19));
-        resetButton.setForeground(Color.WHITE);
-        resetButton.setFont(new Font("Arial", Font.BOLD, 12));
-        resetButton.addActionListener(e -> {
-            bonesCollected = 0;
-            updateGUI();
-            ctx.log("Counter reset to 0");
-        });
-
-        buttonPanel.add(tradeButton);
-        buttonPanel.add(resetButton);
-
-        panel.add(Box.createVerticalStrut(10));
-        panel.add(bonesLabel);
-        panel.add(Box.createVerticalStrut(5));
-        panel.add(statusLabel);
-        panel.add(Box.createVerticalStrut(10));
-        panel.add(buttonPanel);
-        panel.add(Box.createVerticalStrut(10));
-
-        guiFrame.add(panel);
-        guiFrame.setVisible(true);
-    }
-
-    /*
-     * UPDATE GUI DISPLAY
-     */
-    private void updateGUI() {
-
-        if (bonesLabel != null) {
-            bonesLabel.setText("Bones Collected: " + bonesCollected + " / " + BONES_TO_TRADE);
-
-            if (bonesCollected >= BONES_TO_TRADE) {
-                bonesLabel.setForeground(new Color(0, 255, 0));
-            } else {
-                bonesLabel.setForeground(Color.WHITE);
-            }
-        }
-
-        if (statusLabel != null) {
-            String status = "";
-            switch (currentState) {
-                case FIGHTING:
-                    status = "Status: Fighting";
-                    break;
-                case HOME:
-                    status = "Status: Banking";
-                    break;
-                case TRADING:
-                    status = "Status: Trading";
-                    break;
-                case WAITING_FOR_PARTNER:
-                    status = "Status: Waiting for Partner";
-                    break;
-                case RECOVERING:
-                    status = "Status: Recovering";
-                    break;
-                default:
-                    status = "Status: " + currentState;
-            }
-            statusLabel.setText(status);
-        }
     }
 
     @Override
@@ -233,26 +113,7 @@ public class WestDragonsScript extends Script {
 
         var local = ctx.players.getLocal();
 
-        if (local == null) {
-            ctx.log("Player logged out! Scheduling relog...");
-            ctx.scheduleRelog(1);
-            return 1000;
-        }
-
-        SwingUtilities.invokeLater(this::updateGUI);
-
         long now = System.currentTimeMillis();
-
-        /*
-         * CHECK IF BONE LIMIT REACHED OR MANUAL TRADE INITIATED
-         */
-        if ((bonesCollected >= BONES_TO_TRADE || forceTradeFlag) && currentState != State.TRADING && currentState != State.WAITING_FOR_PARTNER) {
-            ctx.log("Bone limit reached! Initiating trade...");
-            currentState = State.WAITING_FOR_PARTNER;
-            tradeInitiated = false;
-            forceTradeFlag = false;
-            return 2000;
-        }
 
         /*
          * DETERMINE CURRENT STATE
@@ -296,25 +157,6 @@ public class WestDragonsScript extends Script {
         }
 
         /*
-         * PRIORITY 1.5:
-         * PKER DETECTION
-         */
-        if (ctx.pathing.inRegion(WEST_DRAGONS_REGION) && isPlayerNearby()) {
-
-            if (now - lastPKerEncounter >= PKER_COOLDOWN) {
-                ctx.log("PKer detected! Teleporting home and waiting 60 seconds...");
-                sendHome();
-                lastPKerEncounter = now;
-                return 3000;
-            } else {
-                /*
-                 * Still in cooldown, keep waiting
-                 */
-                return 2000;
-            }
-        }
-
-        /*
          * PRIORITY 2:
          * STATE HANDLING
          */
@@ -324,7 +166,7 @@ public class WestDragonsScript extends Script {
                 return handleHome();
 
             case FIGHTING:
-                return handleFighting();
+                return handleFighting(local);
 
             case RECOVERING:
                 return handleRecovery();
@@ -353,16 +195,20 @@ public class WestDragonsScript extends Script {
         if (now - lastBankCheck >= 3000) {
             lastBankCheck = now;
 
-            if (ctx.bank.isOpen()) {
-                bonesInBank = ctx.bank.getCount("Dragon bones");
-                ctx.log("Bones in bank: " + bonesInBank);
+            if (!ctx.bank.isOpen()) {
+                ctx.bank.open();
+                return 2000;
+            }
 
-                if (bonesInBank >= BONES_BANK_THRESHOLD) {
-                    ctx.log("Enough bones for trade! Moving to trade...");
-                    currentState = State.WAITING_FOR_PARTNER;
-                    tradeInitiated = false;
-                    return 2000;
-                }
+            bonesInBank = ctx.bank.getCount("Dragon bones");
+            ctx.log("Bones in bank: " + bonesInBank);
+
+            if (bonesInBank >= BONES_BANK_THRESHOLD) {
+                ctx.log("Enough bones for trade! Moving to trade...");
+                ctx.bank.close();
+                currentState = State.WAITING_FOR_PARTNER;
+                tradeInitiated = false;
+                return 2000;
             }
         }
 
@@ -400,7 +246,7 @@ public class WestDragonsScript extends Script {
     /*
      * DRAGON REGION
      */
-    private int handleFighting() {
+    private int handleFighting(Object localPlayer) {
 
         /*
          * PRIORITY 1:
@@ -465,9 +311,6 @@ public class WestDragonsScript extends Script {
 
                     lastLootAttempt = now;
 
-                    bonesCollected++;
-                    ctx.log("Bones collected: " + bonesCollected);
-
                     bones.interact("Take");
 
                     markProgress();
@@ -510,6 +353,7 @@ public class WestDragonsScript extends Script {
             }
 
             dragon.interact("Attack");
+            currentTarget = dragon;
 
             lastAttackAttempt = now;
 
@@ -616,48 +460,6 @@ public class WestDragonsScript extends Script {
         } catch (Exception e) {
             return false;
         }
-    }
-
-    /*
-     * CHECK FOR PKERS (players with skull nearby)
-     */
-    private boolean isPlayerNearby() {
-
-        if (!ctx.pathing.inRegion(WEST_DRAGONS_REGION)) {
-            return false;
-        }
-
-        try {
-            var players = ctx.players.query().list();
-
-            if (players == null || players.isEmpty()) {
-                return false;
-            }
-
-            var local = ctx.players.getLocal();
-            if (local == null) {
-                return false;
-            }
-
-            for (var player : players) {
-                if (player == null || player.equals(local)) {
-                    continue;
-                }
-
-                int distance = ctx.pathing.distanceTo(player);
-
-                if (distance <= PKER_DETECTION_RADIUS) {
-                    if (player.getSkullIcon() != null) {
-                        return true;
-                    }
-                }
-            }
-
-        } catch (Exception e) {
-            return false;
-        }
-
-        return false;
     }
 
     /*
@@ -819,24 +621,34 @@ public class WestDragonsScript extends Script {
                     return 2000;
                 }
 
-                try {
-                    if (ctx.trade.isOpen()) {
-                        int bonesInInventory = ctx.inventory.getCount("Dragon bones");
+                if (ctx.trade.isOpen()) {
+                    int bonesInInventory = ctx.inventory.getCount("Dragon bones");
 
-                        if (bonesInInventory < BONES_TO_TRADE) {
-                            ctx.log("Not enough bones in inventory, returning to home");
-                            currentState = State.HOME;
-                            tradeInitiated = false;
-                            return 2000;
-                        }
-
-                        ctx.log("Offering " + BONES_TO_TRADE + " dragon bones...");
-                        ctx.trade.offer("Dragon bones", BONES_TO_TRADE);
-
+                    if (bonesInInventory < BONES_TO_TRADE) {
+                        ctx.log("Withdrawing bones from bank...");
+                        ctx.trade.decline();
+                        ctx.bank.open();
                         return 2000;
                     }
-                } catch (Exception e) {
-                    ctx.log("Trade error: " + e.getMessage());
+
+                    if (!ctx.trade.hasOffered("Dragon bones", BONES_TO_TRADE)) {
+                        ctx.log("Offering " + BONES_TO_TRADE + " dragon bones...");
+                        ctx.trade.offer("Dragon bones", BONES_TO_TRADE);
+                        return 2000;
+                    }
+
+                    if (ctx.trade.otherPlayerAccepted()) {
+                        ctx.log("Accepting trade...");
+                        ctx.trade.accept();
+                        return 2000;
+                    }
+
+                    if (ctx.trade.isOnFinalScreen()) {
+                        ctx.log("Confirming final trade...");
+                        ctx.trade.accept();
+                        markProgress();
+                        return 3000;
+                    }
                 }
 
                 return 1000;
@@ -846,18 +658,10 @@ public class WestDragonsScript extends Script {
         ctx.log("Partner not found, returning to home...");
         currentState = State.HOME;
         tradeInitiated = false;
-
-        bonesCollected = 0;
-        ctx.log("Trade complete! Counter reset to 0");
-        SwingUtilities.invokeLater(this::updateGUI);
-
         return 2000;
     }
 
     @Override
     public void onStop() {
-        if (guiFrame != null) {
-            guiFrame.dispose();
-        }
     }
 }
