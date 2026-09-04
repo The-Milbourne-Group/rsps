@@ -510,7 +510,6 @@ public class WestDragonsScript extends Script {
             }
 
             dragon.interact("Attack");
-            currentTarget = dragon;
 
             lastAttackAttempt = now;
 
