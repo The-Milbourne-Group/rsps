@@ -239,7 +239,7 @@ public class WestDragonsScript extends Script {
             return 1000;
         }
 
-        updateGUI();
+        SwingUtilities.invokeLater(this::updateGUI);
 
         long now = System.currentTimeMillis();
 
@@ -849,7 +849,7 @@ public class WestDragonsScript extends Script {
 
         bonesCollected = 0;
         ctx.log("Trade complete! Counter reset to 0");
-        updateGUI();
+        SwingUtilities.invokeLater(this::updateGUI);
 
         return 2000;
     }
