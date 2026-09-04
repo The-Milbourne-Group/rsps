@@ -10,7 +10,7 @@ import rs.kreme.ksbot.api.wrappers.KSObject;
         name = "West Dragons",
         author = "YourName",
         servers = {"osrs"},
-        description = "Fights green dragons, collects bones, banks, and recovers from failures",
+        description = "Fights green dragons, collects bones, keys and charms, banks, and recovers from failures",
         category = Category.COMBAT
 )
 public class WestDragonsScript extends Script {
@@ -30,21 +30,35 @@ public class WestDragonsScript extends Script {
     private static final String BANK_BOOTH = "Bank booth";
 
     /*
+     * LOOT KEYWORDS
+     *
+     * Any ground item whose name contains one of these is taken, on top
+     * of LOOT itself. Kept lowercase: names are lowercased before the
+     * comparison so the match is case-insensitive.
+     *
+     * Substring matching is deliberate ("Crystal key", "Loop half of a
+     * key" and "Gold charm" all match from two entries) but it is blunt:
+     * "key" also matches "Monkey". Narrow an entry if your server drops
+     * something that collides.
+     */
+    private static final String[] LOOT_KEYWORDS = {"key", "charm"};
+
+    /*
      * HEALTH / PRAYER
      */
     private static final int EAT_HEALTH = 60;
-    private static final int EMERGENCY_HEALTH = 35;
-    private static final int LOW_PRAYER = 30;
+    private static final int EMERGENCY_HEALTH = 30;
+    private static final int LOW_PRAYER = 15;
 
     /*
      * INVENTORY
      */
-    private static final int MIN_FOOD_TO_CONTINUE = 3;
+    private static final int MIN_FOOD_TO_CONTINUE = 1;
 
     /*
      * DISTANCES
      */
-    private static final int BONE_DISTANCE = 12;
+    private static final int LOOT_DISTANCE = 12;
     private static final int DRAGON_SEARCH_RADIUS = 24;
 
     /*
@@ -178,10 +192,17 @@ public class WestDragonsScript extends Script {
     private int handleHome() {
 
         /*
-         * Loot to deposit, or food to restock:
-         * both are resolved by the same preset.
+         * Bones to deposit, an inventory filled with other loot, or food
+         * to restock: all three are resolved by the same preset.
+         *
+         * The isFull() case matters because keys and charms are not
+         * named LOOT. Without it, arriving home full of charms and no
+         * bones would send us straight back out, only to turn around
+         * again on the full-inventory check.
          */
-        if (ctx.inventory.contains(LOOT) || foodCount() < MIN_FOOD_TO_CONTINUE) {
+        if (ctx.inventory.contains(LOOT)
+                || ctx.inventory.isFull()
+                || foodCount() < MIN_FOOD_TO_CONTINUE) {
 
             /*
              * preset() marks progress itself on success.
@@ -190,7 +211,7 @@ public class WestDragonsScript extends Script {
         }
 
         /*
-         * We have supplies and no bones.
+         * We have supplies and nothing to bank.
          * Travel to West Dragons.
          */
         sendWest();
@@ -248,15 +269,13 @@ public class WestDragonsScript extends Script {
 
         if (now - lastLootAttempt >= LOOT_COOLDOWN) {
 
-            KSGroundItem bones = ctx.groundItems.query()
-                    .withExactName(LOOT)
-                    .closest();
+            KSGroundItem loot = findLoot();
 
-            if (bones != null && ctx.pathing.distanceTo(bones) <= BONE_DISTANCE) {
+            if (loot != null) {
 
                 lastLootAttempt = now;
 
-                bones.interact("Take");
+                loot.interact("Take");
 
                 markProgress();
 
@@ -316,6 +335,81 @@ public class WestDragonsScript extends Script {
         sendHome();
 
         return 3000;
+    }
+
+    /*
+     * FIND THE CLOSEST ITEM IN RANGE THAT WE WANT
+     */
+    private KSGroundItem findLoot() {
+
+        var items = ctx.groundItems.query().list();
+
+        if (items == null || items.isEmpty()) {
+            return null;
+        }
+
+        KSGroundItem closest = null;
+        int closestDistance = Integer.MAX_VALUE;
+
+        for (KSGroundItem item : items) {
+
+            if (item == null || !isWantedLoot(item)) {
+                continue;
+            }
+
+            int distance = ctx.pathing.distanceTo(item);
+
+            if (distance > LOOT_DISTANCE || distance >= closestDistance) {
+                continue;
+            }
+
+            closest = item;
+            closestDistance = distance;
+        }
+
+        return closest;
+    }
+
+    /*
+     * DO WE WANT THIS ITEM
+     */
+    private boolean isWantedLoot(KSGroundItem item) {
+
+        String name = nameOf(item);
+
+        if (name == null) {
+            return false;
+        }
+
+        if (name.equalsIgnoreCase(LOOT)) {
+            return true;
+        }
+
+        String lowerName = name.toLowerCase();
+
+        for (String keyword : LOOT_KEYWORDS) {
+            if (lowerName.contains(keyword)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /*
+     * READ A GROUND ITEM NAME
+     *
+     * The one place this script reads an item name, so a stale wrapper
+     * costs a single pickup rather than the whole loop.
+     */
+    private String nameOf(KSGroundItem item) {
+
+        try {
+            return item.getName();
+
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     /*
