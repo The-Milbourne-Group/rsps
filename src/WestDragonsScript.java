@@ -22,6 +22,14 @@ public class WestDragonsScript extends Script {
     private static final int WEST_DRAGONS_REGION = 11832;
 
     /*
+     * NAMES
+     */
+    private static final String FOOD = "Shark";
+    private static final String LOOT = "Dragon bones";
+    private static final String DRAGON = "Green dragon";
+    private static final String BANK_BOOTH = "Bank booth";
+
+    /*
      * HEALTH / PRAYER
      */
     private static final int EAT_HEALTH = 60;
@@ -37,7 +45,7 @@ public class WestDragonsScript extends Script {
      * DISTANCES
      */
     private static final int BONE_DISTANCE = 12;
-    private static final int DRAGON_SEARCH_RADIUS = 50;
+    private static final int DRAGON_SEARCH_RADIUS = 24;
 
     /*
      * COOLDOWNS
@@ -62,13 +70,10 @@ public class WestDragonsScript extends Script {
     private enum State {
         HOME,
         FIGHTING,
-        LOOTING,
-        RETURNING,
         RECOVERING
     }
 
     private State currentState = State.RECOVERING;
-    private KSNPC currentTarget = null;
 
     /*
      * TIMERS
@@ -93,7 +98,16 @@ public class WestDragonsScript extends Script {
     @Override
     public int onProcess() {
 
-        var local = ctx.players.getLocal();
+        /*
+         * NO LOCAL PLAYER
+         *
+         * The world is not loaded (logged out, loading screen).
+         * Every ctx call below assumes a live player, so idle
+         * instead of acting on a half-initialised world.
+         */
+        if (ctx.players.getLocal() == null) {
+            return 1000;
+        }
 
         long now = System.currentTimeMillis();
 
@@ -148,7 +162,7 @@ public class WestDragonsScript extends Script {
                 return handleHome();
 
             case FIGHTING:
-                return handleFighting(local);
+                return handleFighting();
 
             case RECOVERING:
                 return handleRecovery();
@@ -164,25 +178,15 @@ public class WestDragonsScript extends Script {
     private int handleHome() {
 
         /*
-         * If we have loot, bank it.
+         * Loot to deposit, or food to restock:
+         * both are resolved by the same preset.
          */
-        if (ctx.inventory.contains("Dragon bones")) {
-            if (preset()) {
-                markProgress();
-                return 2500;
-            }
-            return 1500;
-        }
+        if (ctx.inventory.contains(LOOT) || foodCount() < MIN_FOOD_TO_CONTINUE) {
 
-        /*
-         * If we are low/out of food, load the preset.
-         */
-        if (foodCount() < MIN_FOOD_TO_CONTINUE) {
-            if (preset()) {
-                markProgress();
-                return 2500;
-            }
-            return 1500;
+            /*
+             * preset() marks progress itself on success.
+             */
+            return preset() ? 2500 : 1500;
         }
 
         /*
@@ -197,28 +201,19 @@ public class WestDragonsScript extends Script {
     /*
      * DRAGON REGION
      */
-    private int handleFighting(Object localPlayer) {
+    private int handleFighting() {
 
         /*
          * PRIORITY 1:
-         * MAKE SURE WE HAVE ENOUGH FOOD
+         * OUT OF FOOD, OR NOWHERE TO PUT LOOT
          */
-        if (foodCount() < MIN_FOOD_TO_CONTINUE) {
+        if (foodCount() < MIN_FOOD_TO_CONTINUE || ctx.inventory.isFull()) {
             sendHome();
             return 1500;
         }
 
         /*
          * PRIORITY 2:
-         * INVENTORY FULL
-         */
-        if (ctx.inventory.isFull()) {
-            sendHome();
-            return 1500;
-        }
-
-        /*
-         * PRIORITY 3:
          * PRAYER
          */
         ctx.prayer.enable(Prayer.Prayers.PROTECT_FROM_MELEE);
@@ -233,7 +228,7 @@ public class WestDragonsScript extends Script {
         }
 
         /*
-         * PRIORITY 4:
+         * PRIORITY 3:
          * EAT WHEN NECESSARY
          */
         if (ctx.combat.getCurrentHealth() < EAT_HEALTH) {
@@ -244,35 +239,33 @@ public class WestDragonsScript extends Script {
         }
 
         /*
-         * PRIORITY 5:
+         * PRIORITY 4:
          * LOOT
+         *
+         * Inventory space is already guaranteed by PRIORITY 1.
          */
         long now = System.currentTimeMillis();
 
         if (now - lastLootAttempt >= LOOT_COOLDOWN) {
 
             KSGroundItem bones = ctx.groundItems.query()
-                    .withExactName("Dragon bones")
+                    .withExactName(LOOT)
                     .closest();
 
-            if (bones != null
-                    && !ctx.inventory.isFull()) {
+            if (bones != null && ctx.pathing.distanceTo(bones) <= BONE_DISTANCE) {
 
-                if (ctx.pathing.distanceTo(bones) <= BONE_DISTANCE) {
+                lastLootAttempt = now;
 
-                    lastLootAttempt = now;
+                bones.interact("Take");
 
-                    bones.interact("Take");
+                markProgress();
 
-                    markProgress();
-
-                    return 1000;
-                }
+                return 1000;
             }
         }
 
         /*
-         * PRIORITY 6:
+         * PRIORITY 5:
          * FIND AVAILABLE DRAGON (not in combat)
          */
         KSNPC dragon = findAvailableDragon();
@@ -290,7 +283,7 @@ public class WestDragonsScript extends Script {
         }
 
         /*
-         * PRIORITY 7:
+         * PRIORITY 6:
          * COMBAT VERIFICATION
          */
         if (now - lastAttackAttempt >= ATTACK_COOLDOWN) {
@@ -304,7 +297,6 @@ public class WestDragonsScript extends Script {
             }
 
             dragon.interact("Attack");
-            currentTarget = dragon;
 
             lastAttackAttempt = now;
 
@@ -327,20 +319,15 @@ public class WestDragonsScript extends Script {
     }
 
     /*
-     * FIND AN AVAILABLE DRAGON WITHIN 24 TILE RADIUS
+     * FIND THE CLOSEST DRAGON IN RANGE THAT NOBODY IS FIGHTING
      */
     private KSNPC findAvailableDragon() {
 
         var dragons = ctx.npcs.query()
-                .withName("Green dragon")
+                .withName(DRAGON)
                 .list();
 
         if (dragons == null || dragons.isEmpty()) {
-            return null;
-        }
-
-        var local = ctx.players.getLocal();
-        if (local == null) {
             return null;
         }
 
@@ -348,21 +335,20 @@ public class WestDragonsScript extends Script {
         int closestDistance = Integer.MAX_VALUE;
 
         for (KSNPC dragon : dragons) {
+
             if (dragon == null) {
                 continue;
             }
 
             int distance = ctx.pathing.distanceTo(dragon);
 
-            if (distance > 24) {
+            if (distance > DRAGON_SEARCH_RADIUS || distance >= closestDistance) {
                 continue;
             }
 
             if (!isDragonInCombat(dragon)) {
-                if (distance < closestDistance) {
-                    closestAvailable = dragon;
-                    closestDistance = distance;
-                }
+                closestAvailable = dragon;
+                closestDistance = distance;
             }
         }
 
@@ -379,17 +365,16 @@ public class WestDragonsScript extends Script {
         }
 
         try {
-            var interacting = dragon.getInteracting();
-
-            if (interacting != null) {
-                return true;
-            }
+            return dragon.getInteracting() != null;
 
         } catch (Exception e) {
-            return false;
+            /*
+             * The NPC can despawn between the query and this read.
+             * A stale wrapper is not a dragon we can attack, and it
+             * must not kill the script loop, so treat it as busy.
+             */
+            return true;
         }
-
-        return false;
     }
 
     /*
@@ -397,18 +382,20 @@ public class WestDragonsScript extends Script {
      */
     private boolean isAlreadyAttacking() {
 
+        var local = ctx.players.getLocal();
+
+        if (local == null) {
+            return false;
+        }
+
         try {
-            var local = ctx.players.getLocal();
-
-            if (local == null) {
-                return false;
-            }
-
-            var interacting = local.getInteracting();
-
-            return interacting != null;
+            return local.getInteracting() != null;
 
         } catch (Exception e) {
+            /*
+             * Interaction target can despawn mid-read. Assume we are
+             * not attacking so the script re-targets rather than stalls.
+             */
             return false;
         }
     }
@@ -425,7 +412,7 @@ public class WestDragonsScript extends Script {
         }
 
         KSObject bank = ctx.groundObjects.query()
-                .withName("Bank booth")
+                .withName(BANK_BOOTH)
                 .closest();
 
         if (bank == null) {
@@ -434,9 +421,7 @@ public class WestDragonsScript extends Script {
 
         lastPresetAttempt = now;
 
-        boolean interacted = bank.interact("Last-preset");
-
-        if (interacted) {
+        if (bank.interact("Last-preset")) {
             ctx.log("Preset loaded successfully");
             markProgress();
             return true;
@@ -487,9 +472,9 @@ public class WestDragonsScript extends Script {
      */
     private void eatIfPossible() {
 
-        if (ctx.inventory.contains("Shark")) {
+        if (ctx.inventory.contains(FOOD)) {
 
-            ctx.consumables.eat("Shark");
+            ctx.consumables.eat(FOOD);
 
             markProgress();
         }
@@ -499,8 +484,7 @@ public class WestDragonsScript extends Script {
      * FOOD COUNT
      */
     private int foodCount() {
-
-        return ctx.inventory.contains("Shark") ? MIN_FOOD_TO_CONTINUE : 0;
+        return ctx.inventory.getCount(FOOD);
     }
 
     /*
